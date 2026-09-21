@@ -1,6 +1,7 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Prefetch
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action
@@ -9,6 +10,7 @@ from rest_framework.response import Response
 
 from apps.accounts.models import User
 from .models import Plan, PlanDay, PlanItem, StudentFixedCommitment
+from .exports import render_excel, render_pdf
 from .serializers import (
     PlanDayDetailSerializer, PlanDaySerializer, PlanDetailSerializer, PlanItemSerializer,
     PlanSerializer, StudentFixedCommitmentSerializer, manageable_plan,
@@ -45,7 +47,7 @@ class PlanViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = visible_plans(self.request.user)
-        if self.action == "retrieve":
+        if self.action in ("retrieve", "export_pdf", "export_excel"):
             items = PlanItem.objects.select_related("subject", "chapter", "topic")
             days = PlanDay.objects.prefetch_related(Prefetch("items", queryset=items))
             queryset = queryset.prefetch_related(Prefetch("days", queryset=days))
@@ -53,6 +55,23 @@ class PlanViewSet(viewsets.ModelViewSet):
 
     def get_serializer_class(self):
         return PlanDetailSerializer if self.action == "retrieve" else PlanSerializer
+
+    @action(detail=True, methods=("get",), url_path="export/pdf")
+    def export_pdf(self, request, pk=None):
+        plan = self.get_object()
+        response = HttpResponse(render_pdf(plan), content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="plan-{plan.pk}.pdf"'
+        return response
+
+    @action(detail=True, methods=("get",), url_path="export/excel")
+    def export_excel(self, request, pk=None):
+        plan = self.get_object()
+        response = HttpResponse(
+            render_excel(plan),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        response["Content-Disposition"] = f'attachment; filename="plan-{plan.pk}.xlsx"'
+        return response
 
     @action(detail=True, methods=("post",))
     @transaction.atomic
@@ -98,6 +117,8 @@ class PlanDayViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = PlanDay.objects.select_related("plan__student", "plan__counselor__user")
+        if self.action in ("retrieve", "duplicate"):
+            queryset = queryset.prefetch_related(Prefetch("items", queryset=PlanItem.objects.select_related("subject", "chapter", "topic")))
         return queryset.filter(plan__in=visible_plans(self.request.user))
 
     def get_serializer_class(self):
@@ -121,6 +142,7 @@ class PlanDayViewSet(viewsets.ModelViewSet):
         candidate.save()
         for item in source.items.all():
             copy_item(item, candidate)
+        candidate = PlanDay.objects.prefetch_related(Prefetch("items", queryset=PlanItem.objects.select_related("subject", "chapter", "topic"))).get(pk=candidate.pk)
         return Response(PlanDayDetailSerializer(candidate, context=self.get_serializer_context()).data, status=status.HTTP_201_CREATED)
 
 

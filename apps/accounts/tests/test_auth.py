@@ -4,6 +4,9 @@ from django.db import IntegrityError, transaction
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
+from rest_framework_simplejwt.tokens import AccessToken
+from django.utils import timezone
+from datetime import timedelta
 
 
 class UserModelTests(APITestCase):
@@ -49,6 +52,24 @@ class AuthenticationTests(APITestCase):
         )
         self.assertEqual(refresh.status_code, status.HTTP_200_OK)
         self.assertIn("access", refresh.data)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh.data['access']}")
+        me = self.client.get(reverse("current-user"))
+        self.assertEqual(me.status_code, status.HTTP_200_OK)
+        self.assertEqual(me.data["username"], "student")
+
+    def test_expired_access_rejected_but_refresh_still_works(self):
+        pair = self.client.post(
+            reverse("token-obtain-pair"),
+            {"username": "student", "password": "test-password"},
+        ).data
+        expired = AccessToken(pair["access"])
+        expired.set_exp(from_time=timezone.now() - timedelta(hours=1), lifetime=timedelta(minutes=1))
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {str(expired)}")
+        self.assertEqual(self.client.get(reverse("current-user")).status_code, status.HTTP_401_UNAUTHORIZED)
+        refreshed = self.client.post(reverse("token-refresh"), {"refresh": pair["refresh"]})
+        self.assertEqual(refreshed.status_code, status.HTTP_200_OK)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {refreshed.data['access']}")
+        self.assertEqual(self.client.get(reverse("current-user")).status_code, status.HTTP_200_OK)
 
     def test_authenticated_current_user(self):
         self.client.force_authenticate(self.user)

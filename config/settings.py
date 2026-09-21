@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
@@ -32,6 +33,7 @@ INSTALLED_APPS = [
     "apps.accounts",
     "apps.academics",
     "apps.planning",
+    "apps.core",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -95,6 +97,10 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+}
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
 }
 SPECTACULAR_SETTINGS = {
     "TITLE": "Amootech Platform API",

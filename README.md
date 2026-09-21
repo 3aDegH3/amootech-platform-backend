@@ -1,8 +1,10 @@
 # Amootech platform development environment
 
-This repository owns the Docker Compose environment for the Amootech backend,
-the sibling frontend repository, and PostgreSQL. Keep both repositories in the
-same parent directory:
+This backend repository owns the full-stack development Docker Compose configuration
+for convenience and version control. The backend and frontend remain separate
+applications in separate Git repositories; this Compose file only orchestrates
+their local development environment with PostgreSQL. Keep both repositories in
+the same parent directory:
 
 ```text
 amootech/
@@ -39,6 +41,7 @@ docker compose logs -f backend
 docker compose logs -f frontend
 docker compose exec backend python manage.py <command>
 docker compose exec backend python manage.py migrate
+docker compose exec backend python manage.py seed_academics
 docker compose exec backend python manage.py test
 docker compose exec frontend npm run lint
 ```
@@ -53,3 +56,7 @@ The project uses the `accounts.User` custom user model and JWT endpoints under
 `/api/v1/auth/`. Public registration is intentionally not available. After a
 fresh database is created, apply migrations explicitly with the command above.
 Tests create and destroy a separate PostgreSQL test database.
+
+Run `seed_academics` after migrations to load grade 10–12 planning subjects,
+chapters, and representative topics for mathematics, experimental sciences,
+and humanities. The command is safe to rerun and leaves existing records intact.

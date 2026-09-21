@@ -66,4 +66,4 @@ class Topic(models.Model):
         constraints = [models.UniqueConstraint(fields=("chapter", "name"), name="unique_topic_per_chapter")]
 
     def __str__(self):
-        return self.name
+        return self.name    

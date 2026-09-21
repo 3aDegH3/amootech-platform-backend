@@ -31,6 +31,7 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "apps.accounts",
     "apps.academics",
+    "apps.planning",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",

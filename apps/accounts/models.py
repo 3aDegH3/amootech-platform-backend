@@ -44,6 +44,7 @@ class StudentProfile(models.Model):
     counselor = models.ForeignKey(CounselorProfile, null=True, blank=True, on_delete=models.SET_NULL, related_name="students")
     grade = models.ForeignKey("academics.Grade", null=True, blank=True, on_delete=models.PROTECT)
     field = models.ForeignKey("academics.Field", null=True, blank=True, on_delete=models.PROTECT)
+    school_name = models.CharField(max_length=150, blank=True)
 
     def clean(self):
         from django.core.exceptions import ValidationError

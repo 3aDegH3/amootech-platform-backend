@@ -15,6 +15,7 @@ urlpatterns = [
     path("api/v1/health/", HealthView.as_view(), name="health"),
     path("api/v1/", include(profiles.urls)),
     path("api/v1/academics/", include("apps.academics.urls")),
+    path("api/v1/planning/", include("apps.planning.urls")),
     path("api/v1/auth/", include("apps.accounts.urls")),
     path("api/v1/schema/", SpectacularAPIView.as_view(), name="schema"),
     path(

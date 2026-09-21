@@ -2,7 +2,7 @@ from django.db.models.deletion import ProtectedError
 from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from apps.accounts.models import User
 from .models import Grade, Field, Subject, Chapter, Topic
 from .serializers import GradeSerializer, FieldSerializer, SubjectSerializer, ChapterSerializer, TopicSerializer
@@ -39,11 +39,29 @@ class GradeViewSet(AcademicViewSet):
     queryset = Grade.objects.all()
     serializer_class = GradeSerializer
 
+    def get_permissions(self):
+        if self.action in ("list", "retrieve"):
+            return [AllowAny()]
+        return super().get_permissions()
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        return queryset.filter(is_active=True) if not self.request.user.is_authenticated else queryset
+
 
 class FieldViewSet(AcademicViewSet):
     queryset = Field.objects.select_related("grade")
     serializer_class = FieldSerializer
     filter_field = "grade"
+
+    def get_permissions(self):
+        if self.action in ("list", "retrieve"):
+            return [AllowAny()]
+        return super().get_permissions()
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        return queryset.filter(is_active=True, grade__is_active=True) if not self.request.user.is_authenticated else queryset
 
 
 class SubjectViewSet(AcademicViewSet):

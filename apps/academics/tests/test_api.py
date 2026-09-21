@@ -36,7 +36,7 @@ class AcademicAPITests(APITestCase):
                 self.assertEqual(self.client.patch(f"{url}{obj.pk}/", {"name": "x"}).status_code, 403)
                 self.assertEqual(self.client.delete(f"{url}{obj.pk}/").status_code, 403)
             self.client.force_authenticate(user=None)
-            self.assertEqual(self.client.get(url).status_code, 401)
+            self.assertEqual(self.client.get(url).status_code, 200 if plural in ("grades", "fields") else 401)
             parent = obj
 
     def test_unique_sibling_names_and_delete(self):

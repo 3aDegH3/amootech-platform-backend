@@ -33,6 +33,7 @@ INSTALLED_APPS = [
     "apps.accounts",
     "apps.academics",
     "apps.planning",
+    "apps.daily_reports",
     "apps.core",
 ]
 MIDDLEWARE = [

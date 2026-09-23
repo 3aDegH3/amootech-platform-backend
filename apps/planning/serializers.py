@@ -1,8 +1,9 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
+from django.utils import timezone
 
 from apps.accounts.models import CounselorProfile, StudentProfile, User
-from .models import Plan, PlanDay, PlanItem, StudentFixedCommitment
+from .models import Plan, PlanDay, PlanItem, PlanItemExecution, StudentFixedCommitment
 
 
 def validate_model(serializer, attrs):
@@ -24,14 +25,35 @@ def manageable_plan(plan, user):
     )
 
 
+def item_has_student_data(item):
+    return hasattr(item, "execution") or item.report_items.exists()
+
+
+def enforce_editable_day(day):
+    if day.date < timezone.localdate():
+        raise serializers.ValidationError("روزهای گذشته فقط قابل مشاهده هستند.")
+
+
 class PlanItemSerializer(serializers.ModelSerializer):
     subject_name = serializers.CharField(source="subject.name", read_only=True)
     chapter_name = serializers.CharField(source="chapter.name", read_only=True)
     topic_name = serializers.CharField(source="topic.name", read_only=True)
+    counselor_editable = serializers.SerializerMethodField()
+    edit_lock_reason = serializers.SerializerMethodField()
 
     class Meta:
         model = PlanItem
-        fields = ("id", "plan_day", "kind", "ordering", "title", "planned_duration_minutes", "start_time", "end_time", "note", "subject", "subject_name", "chapter", "chapter_name", "topic", "topic_name", "test_count")
+        fields = ("id", "plan_day", "kind", "ordering", "title", "planned_duration_minutes", "start_time", "end_time", "note", "subject", "subject_name", "chapter", "chapter_name", "topic", "topic_name", "test_count", "counselor_editable", "edit_lock_reason")
+
+    def get_counselor_editable(self, obj):
+        return obj.plan_day.date >= timezone.localdate() and not item_has_student_data(obj)
+
+    def get_edit_lock_reason(self, obj):
+        if obj.plan_day.date < timezone.localdate():
+            return "گذشته — فقط مشاهده"
+        if item_has_student_data(obj):
+            return "این باکس توسط دانش‌آموز شروع یا ثبت شده و دیگر قابل ویرایش کامل نیست."
+        return None
 
     def validate(self, attrs):
         user = self.context["request"].user
@@ -42,7 +64,29 @@ class PlanItemSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"plan_day": "This plan is not available to you."})
         if not day:
             return attrs
+        enforce_editable_day(day)
+        if self.instance and item_has_student_data(self.instance):
+            raise serializers.ValidationError("این باکس توسط دانش‌آموز شروع یا ثبت شده و دیگر قابل ویرایش کامل نیست.")
         return validate_model(self, attrs)
+
+
+class PlanItemExecutionSerializer(serializers.ModelSerializer):
+    elapsed_seconds = serializers.SerializerMethodField()
+    completion_method = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PlanItemExecution
+        fields = ("plan_item", "status", "started_at", "current_session_started_at", "accumulated_seconds", "elapsed_seconds", "completed_at", "completion_method")
+
+    def get_elapsed_seconds(self, obj):
+        return obj.elapsed_seconds(self.context.get("now") or timezone.now())
+
+    def get_completion_method(self, obj):
+        return "TIMER" if obj.started_at else "QUICK"
+
+
+class FinishExecutionSerializer(serializers.Serializer):
+    complete = serializers.BooleanField(required=True)
 
 
 class PlanDaySerializer(serializers.ModelSerializer):
@@ -59,6 +103,16 @@ class PlanDaySerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"plan": "This plan is not available to you."})
         if not plan:
             return attrs
+        if self.instance:
+            enforce_editable_day(self.instance)
+        target_date = attrs.get("date", self.instance.date if self.instance else None)
+        if target_date and target_date < timezone.localdate():
+            raise serializers.ValidationError({"date": "نمی‌توان برای روز گذشته برنامه ایجاد یا جابه‌جا کرد."})
+        if self.instance and target_date != self.instance.date and (
+            self.instance.items.filter(execution__isnull=False).exists()
+            or self.instance.items.filter(report_items__isnull=False).exists()
+        ):
+            raise serializers.ValidationError({"date": "روز دارای عملکرد ثبت‌شده دانش‌آموز است و تاریخ آن قابل تغییر نیست."})
         return validate_model(self, attrs)
 
 
@@ -79,6 +133,10 @@ class PlanSerializer(serializers.ModelSerializer):
         read_only_fields = ("status", "published_at", "created_at", "updated_at")
 
     def validate(self, attrs):
+        if self.instance and self.instance.status == Plan.Status.PUBLISHED:
+            changed = set(self.initial_data) - {"title"}
+            if changed:
+                raise serializers.ValidationError("Only the title of a published plan can change; duplicate it for structural changes.")
         if {"status", "published_at"} & set(self.initial_data):
             raise serializers.ValidationError({"status": "Use the publish action to change plan status."})
         user = self.context["request"].user

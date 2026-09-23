@@ -1,14 +1,18 @@
 from datetime import date, time, timedelta
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
+from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import CounselorProfile, StudentProfile
 from apps.academics.models import Chapter, Field, Grade, Subject, Topic
-from apps.planning.models import Plan, PlanDay, PlanItem, StudentFixedCommitment
+from apps.daily_reports.models import DailyReport, DailyReportItem
+from apps.daily_reports.reporting import reporting_data
+from apps.planning.models import Plan, PlanDay, PlanItem, PlanItemExecution, StudentFixedCommitment
 
 User = get_user_model()
 START = date(2026, 10, 5)
@@ -110,6 +114,9 @@ class PlanningTests(APITestCase):
         self.client.force_authenticate(self.admin)
         self.assertEqual(self.client.get(f"{plans}{self.plan.pk}/").status_code, 200)
         self.assertEqual(self.client.patch(f"{plans}{self.plan.pk}/", {"title": "Support edit"}).status_code, 200)
+        self.assertEqual(self.client.patch(f"{plans}{self.plan.pk}/", {"start_date": str(START + timedelta(days=1))}).status_code, 400)
+        self.assertEqual(self.client.patch(f"/api/v1/planning/items/{item.pk}/", {"ordering": 5}).status_code, 200)
+        self.assertEqual(self.client.delete(f"/api/v1/planning/items/{item.pk}/").status_code, 204)
 
     def test_day_item_api_and_copy_independence(self):
         self.client.force_authenticate(self.counselor_user)
@@ -187,3 +194,49 @@ class PlanningTests(APITestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(len(response.data["days"]), 5)
         self.assertLessEqual(len(queries), 6)
+
+    def test_past_today_future_edit_policy_and_execution_safety(self):
+        today = START + timedelta(days=2)
+        policy_plan = Plan.objects.create(
+            student=self.student, counselor=self.counselor, start_date=today - timedelta(days=1),
+            end_date=today + timedelta(days=2), status=Plan.Status.PUBLISHED, published_at=timezone.now(),
+        )
+        past_day = PlanDay.objects.create(plan=policy_plan, date=today - timedelta(days=1))
+        today_day = PlanDay.objects.create(plan=policy_plan, date=today)
+        future_day = PlanDay.objects.create(plan=policy_plan, date=today + timedelta(days=1))
+        past_item = PlanItem.objects.create(plan_day=past_day, kind="STUDY", subject=self.subject, planned_duration_minutes=60)
+        today_item = PlanItem.objects.create(plan_day=today_day, kind="STUDY", subject=self.subject, planned_duration_minutes=90)
+        future_item = PlanItem.objects.create(plan_day=future_day, kind="STUDY", subject=self.subject, planned_duration_minutes=60)
+        self.client.force_authenticate(self.counselor_user)
+        items = "/api/v1/planning/items/"
+        with patch("apps.planning.serializers.timezone.localdate", return_value=today), patch("apps.planning.views.timezone.localdate", return_value=today):
+            self.assertEqual(self.client.patch(f"{items}{past_item.pk}/", {"note": "late edit"}).status_code, 400)
+            self.assertEqual(self.client.delete(f"{items}{past_item.pk}/").status_code, 409)
+            self.assertEqual(self.client.post(items, {"plan_day": past_day.pk, "kind": "STUDY", "subject": self.subject.pk, "planned_duration_minutes": 30}).status_code, 400)
+            edited = self.client.patch(f"{items}{today_item.pk}/", {"planned_duration_minutes": 100, "start_time": "10:00", "end_time": "11:40"})
+            self.assertEqual(edited.status_code, 200, edited.data)
+            added = self.client.post(items, {"plan_day": today_day.pk, "kind": "REVIEW", "subject": self.subject.pk, "planned_duration_minutes": 30})
+            self.assertEqual(added.status_code, 201, added.data)
+            self.assertEqual(self.client.delete(f"{items}{added.data['id']}/").status_code, 204)
+            self.assertEqual(self.client.patch(f"{items}{future_item.pk}/", {"planned_duration_minutes": 75}).status_code, 200)
+            PlanItemExecution.objects.create(
+                student=self.student, plan_item=today_item, status=PlanItemExecution.Status.PARTIAL,
+                started_at=timezone.now(), accumulated_seconds=60 * 60,
+            )
+            report = DailyReport.objects.create(student=self.student, date=today)
+            DailyReportItem.objects.create(report=report, plan_item=today_item, actual_duration_minutes=60, duration_source="MANUAL")
+            rejected = self.client.patch(f"{items}{today_item.pk}/", {"subject": self.other_subject.pk, "planned_duration_minutes": 30})
+            self.assertEqual(rejected.status_code, 400)
+            self.assertIn("دیگر قابل ویرایش", str(rejected.data))
+            self.assertEqual(self.client.patch(f"/api/v1/planning/days/{today_day.pk}/", {"date": str(today + timedelta(days=2))}).status_code, 400)
+            self.assertEqual(self.client.delete(f"{items}{today_item.pk}/").status_code, 409)
+            today_item.refresh_from_db()
+            self.assertEqual(today_item.planned_duration_minutes, 100)
+            report_data = reporting_data(self.student, today, today, "all")
+            self.assertEqual(report_data["summary"]["planned_minutes"], 100)
+            self.assertEqual(report_data["summary"]["actual_minutes"], 60)
+            detail = self.client.get(f"/api/v1/planning/plans/{policy_plan.pk}/")
+            locked = next(row for row in detail.data["days"][1]["items"] if row["id"] == today_item.pk)
+            self.assertFalse(locked["counselor_editable"])
+        self.client.force_authenticate(self.other_counselor_user)
+        self.assertEqual(self.client.patch(f"{items}{future_item.pk}/", {"note": "forbidden"}).status_code, 404)

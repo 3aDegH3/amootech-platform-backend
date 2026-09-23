@@ -116,6 +116,35 @@ class PlanItem(models.Model):
         return super().save(*args, **kwargs)
 
 
+class PlanItemExecution(models.Model):
+    class Status(models.TextChoices):
+        IN_PROGRESS = "IN_PROGRESS", "In progress"
+        PAUSED = "PAUSED", "Paused"
+        COMPLETED = "COMPLETED", "Completed"
+        PARTIAL = "PARTIAL", "Partial"
+        NOT_DONE = "NOT_DONE", "Not done"
+
+    student = models.ForeignKey("accounts.StudentProfile", on_delete=models.CASCADE, related_name="plan_executions")
+    plan_item = models.OneToOneField(PlanItem, on_delete=models.CASCADE, related_name="execution")
+    status = models.CharField(max_length=12, choices=Status.choices)
+    started_at = models.DateTimeField(null=True, blank=True)
+    current_session_started_at = models.DateTimeField(null=True, blank=True)
+    accumulated_seconds = models.PositiveIntegerField(default=0)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("student",), condition=Q(status="IN_PROGRESS"),
+                name="planning_one_active_timer_per_student",
+            ),
+        ]
+
+    def elapsed_seconds(self, now):
+        running = max(0, int((now - self.current_session_started_at).total_seconds())) if self.current_session_started_at else 0
+        return self.accumulated_seconds + running
+
+
 class StudentFixedCommitment(models.Model):
     class Kind(models.TextChoices):
         SCHOOL = "SCHOOL", "School"

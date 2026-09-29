@@ -5,7 +5,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN addgroup --system django && adduser --system --ingroup django django
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libreoffice-calc \
+    fonts-noto-core \
+    fonts-noto-extra \
+    fontconfig \
+    && fc-cache -f \
+    && rm -rf /var/lib/apt/lists/* \
+    && addgroup --system django && adduser --system --ingroup django django
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt

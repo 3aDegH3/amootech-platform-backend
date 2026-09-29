@@ -266,11 +266,17 @@ class Command(BaseCommand):
                     rows.append(row)
                 if report and rng.random() < .28:
                     subject = rng.choice(focus)
-                    chapter = rng.choice(list(subject.chapters.all()))
-                    topics = list(chapter.topics.all())
+                    chapters = list(subject.chapters.all())
+                    if chapters:
+                        chapter = rng.choice(chapters)
+                        topics = list(chapter.topics.all())
+                    else:
+                        chapter = None
+                        topics = []
                     kind = "TEST" if index % 4 == 0 else rng.choice(("STUDY", "REVIEW", "TEST"))
+                    topic = rng.choice(topics) if topics else None
                     extra = DailyReportItem(report=report, kind=kind, subject=subject, chapter=chapter,
-                        topic=rng.choice(topics) if topics else None,
+                        topic=topic,
                         actual_duration_minutes=rng.choice((25, 30, 40, 45, 60)),
                         duration_source=DailyReportItem.DurationSource.MANUAL,
                         resource=rng.choice(RESOURCES), ordering=20)
@@ -281,8 +287,14 @@ class Command(BaseCommand):
                         extra.correct_count, extra.unanswered_count = count - wrong, 0
                     rows.append(extra)
                 if report and rng.random() < .12:
+                    overlaps = any(
+                        item.start_time is not None and item.end_time is not None
+                        and item.start_time < time(18) and item.end_time > time(17)
+                        for item in day_items
+                    )
                     rows.append(DailyReportItem(report=report, kind="EVENT", title=rng.choice(EVENTS),
-                        start_time=time(17), end_time=time(18), actual_duration_minutes=60,
+                        start_time=None if overlaps else time(17),
+                        end_time=None if overlaps else time(18), actual_duration_minutes=60,
                         duration_source=DailyReportItem.DurationSource.MANUAL, ordering=21))
             PlanItemExecution.objects.bulk_create(executions)
             DailyReportItem.objects.bulk_create(rows)

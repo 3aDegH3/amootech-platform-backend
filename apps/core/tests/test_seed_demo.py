@@ -10,6 +10,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import CounselorProfile, StudentProfile, User
+from apps.academics.models import Chapter, Field, Grade, Subject
 from apps.daily_reports.models import DailyReport, DailyReportItem
 from apps.daily_reports.reporting import reporting_data
 from apps.planning.models import Plan, PlanItem, PlanItemExecution
@@ -27,6 +28,27 @@ class DemoSeedTests(TestCase):
                 call_command("seed_demo", stdout=io.StringIO())
         with self.assertRaises(CommandError):
             self.seed(history_days=0)
+
+    def test_subjects_without_active_chapters(self):
+        grade = Grade.objects.create(name="Test grade", ordering=0)
+        field = Field.objects.create(grade=grade, name="Test field")
+        subjects = [Subject.objects.create(field=field, name=f"Subject {i}") for i in range(3)]
+        for inactive in (False, True):
+            with self.subTest(inactive_chapters=inactive):
+                if inactive:
+                    for subject in subjects:
+                        Chapter.objects.create(subject=subject, name="Inactive", is_active=False)
+                self.seed(counselors=1, students_per_counselor=1, history_days=30, reset=True)
+                student = StudentProfile.objects.get(user__username="demo_student")
+                self.assertEqual(student.field_id, field.pk)
+                extras = DailyReportItem.objects.filter(
+                    report__student=student, plan_item__isnull=True, subject__in=subjects,
+                )
+                self.assertTrue(extras.exists())
+                for item in extras:
+                    self.assertIsNone(item.chapter_id)
+                    self.assertIsNone(item.topic_id)
+                    item.full_clean()
 
     def test_people_plans_history_aggregation_and_idempotency(self):
         self.seed()

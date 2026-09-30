@@ -35,7 +35,11 @@ INSTALLED_APPS = [
     "apps.planning",
     "apps.daily_reports",
     "apps.core",
+    "apps.telegram",
 ]
+
+TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "").strip()
+TELEGRAM_BOT_SERVICE_TOKEN = os.getenv("TELEGRAM_BOT_SERVICE_TOKEN", "").strip()
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "corsheaders.middleware.CorsMiddleware",

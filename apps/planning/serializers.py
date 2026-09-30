@@ -30,8 +30,9 @@ def item_has_student_data(item):
 
 
 def enforce_editable_day(day):
-    if day.date < timezone.localdate():
-        raise serializers.ValidationError("روزهای گذشته فقط قابل مشاهده هستند.")
+    # All PlanDays are always active regardless of date (per product rule).
+    # Only execution/report protection matters; past-date block removed.
+    return
 
 
 class PlanItemSerializer(serializers.ModelSerializer):
@@ -46,11 +47,10 @@ class PlanItemSerializer(serializers.ModelSerializer):
         fields = ("id", "plan_day", "kind", "ordering", "title", "planned_duration_minutes", "start_time", "end_time", "note", "subject", "subject_name", "chapter", "chapter_name", "topic", "topic_name", "test_count", "counselor_editable", "edit_lock_reason")
 
     def get_counselor_editable(self, obj):
-        return obj.plan_day.date >= timezone.localdate() and not item_has_student_data(obj)
+        # Date no longer determines editability; only student data locks the item.
+        return not item_has_student_data(obj)
 
     def get_edit_lock_reason(self, obj):
-        if obj.plan_day.date < timezone.localdate():
-            return "گذشته — فقط مشاهده"
         if item_has_student_data(obj):
             return "این باکس توسط دانش‌آموز شروع یا ثبت شده و دیگر قابل ویرایش کامل نیست."
         return None
@@ -103,16 +103,14 @@ class PlanDaySerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"plan": "This plan is not available to you."})
         if not plan:
             return attrs
-        if self.instance:
-            enforce_editable_day(self.instance)
         target_date = attrs.get("date", self.instance.date if self.instance else None)
-        if target_date and target_date < timezone.localdate():
-            raise serializers.ValidationError({"date": "نمی‌توان برای روز گذشته برنامه ایجاد یا جابه‌جا کرد."})
         if self.instance and target_date != self.instance.date and (
             self.instance.items.filter(execution__isnull=False).exists()
             or self.instance.items.filter(report_items__isnull=False).exists()
         ):
             raise serializers.ValidationError({"date": "روز دارای عملکرد ثبت‌شده دانش‌آموز است و تاریخ آن قابل تغییر نیست."})
+        # Past-date restriction removed: all 7 PlanDays are always active.
+        # Only execution/report protection above remains.
         return validate_model(self, attrs)
 
 

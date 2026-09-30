@@ -210,9 +210,12 @@ class PlanningTests(APITestCase):
         self.client.force_authenticate(self.counselor_user)
         items = "/api/v1/planning/items/"
         with patch("apps.planning.serializers.timezone.localdate", return_value=today), patch("apps.planning.views.timezone.localdate", return_value=today):
-            self.assertEqual(self.client.patch(f"{items}{past_item.pk}/", {"note": "late edit"}).status_code, 400)
-            self.assertEqual(self.client.delete(f"{items}{past_item.pk}/").status_code, 409)
-            self.assertEqual(self.client.post(items, {"plan_day": past_day.pk, "kind": "STUDY", "subject": self.subject.pk, "planned_duration_minutes": 30}).status_code, 400)
+            # Past days are now editable like all 7 PlanDays (date no longer blocks). Only execution/report blocks.
+            self.assertEqual(self.client.patch(f"{items}{past_item.pk}/", {"note": "late edit"}).status_code, 200)
+            # Delete of past item without execution is now allowed (only execution/report guarded)
+            new_past = PlanItem.objects.create(plan_day=past_day, kind="STUDY", subject=self.subject, planned_duration_minutes=30)
+            self.assertEqual(self.client.delete(f"{items}{new_past.pk}/").status_code, 204)
+            self.assertEqual(self.client.post(items, {"plan_day": past_day.pk, "kind": "STUDY", "subject": self.subject.pk, "planned_duration_minutes": 30}).status_code, 201)
             edited = self.client.patch(f"{items}{today_item.pk}/", {"planned_duration_minutes": 100, "start_time": "10:00", "end_time": "11:40"})
             self.assertEqual(edited.status_code, 200, edited.data)
             added = self.client.post(items, {"plan_day": today_day.pk, "kind": "REVIEW", "subject": self.subject.pk, "planned_duration_minutes": 30})

@@ -51,13 +51,11 @@ class ProtectedReportDeleteMixin:
             if obj.days.filter(date__lte=today).exists():
                 return Response({"detail": "برنامه‌ای که روز گذشته یا امروز دارد قابل حذف نیست."}, status=status.HTTP_409_CONFLICT)
         elif isinstance(obj, PlanDay):
-            if obj.date < today:
-                return Response({"detail": "روزهای گذشته فقط قابل مشاهده هستند."}, status=status.HTTP_409_CONFLICT)
+            # Past-date delete block removed per product rule: all 7 PlanDays are active. Only execution/report guards remain.
             if obj.items.filter(execution__isnull=False).exists() or obj.items.filter(report_items__isnull=False).exists():
                 return Response({"detail": "این روز دارای عملکرد ثبت‌شده دانش‌آموز است و قابل حذف نیست."}, status=status.HTTP_409_CONFLICT)
         else:
-            if obj.plan_day.date < today:
-                return Response({"detail": "روزهای گذشته فقط قابل مشاهده هستند."}, status=status.HTTP_409_CONFLICT)
+            # Past-date delete block removed for PlanItem as well.
             if hasattr(obj, "execution") or obj.report_items.exists():
                 return Response({"detail": "این باکس توسط دانش‌آموز شروع یا ثبت شده و قابل حذف نیست."}, status=status.HTTP_409_CONFLICT)
         try:
@@ -208,8 +206,6 @@ class PlanDayViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
         if not manageable_plan(target, request.user):
             raise serializers.ValidationError({"target_plan": "This plan is not available to you."})
         date = action_input.validated_data["date"]
-        if date < timezone.localdate():
-            raise serializers.ValidationError({"date": "نمی‌توان روزی را در گذشته کپی کرد."})
         candidate = PlanDay(plan=target, date=date)
         try:
             candidate.full_clean()
@@ -221,12 +217,98 @@ class PlanDayViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
         candidate = PlanDay.objects.prefetch_related(Prefetch("items", queryset=PlanItem.objects.select_related("subject", "chapter", "topic"))).get(pk=candidate.pk)
         return Response(PlanDayDetailSerializer(candidate, context=self.get_serializer_context()).data, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=("post",), url_path="copy-day")
+    @transaction.atomic
+    def copy_day(self, request, pk=None):
+        source = self.get_object()
+        payload = CopyDaySerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        target_day_id = payload.validated_data["target_day"]
+        mode = payload.validated_data.get("mode", "append")
+        if source.pk == target_day_id:
+            raise serializers.ValidationError({"target_day": "Cannot copy a day onto itself."})
+        try:
+            target = PlanDay.objects.select_for_update().get(pk=target_day_id)
+        except PlanDay.DoesNotExist:
+            raise serializers.ValidationError({"target_day": "Target day does not exist."})
+        if target.plan_id != source.plan_id:
+            raise serializers.ValidationError({"target_day": "Target day must belong to same plan."})
+        if not manageable_plan(target.plan, request.user):
+            raise serializers.ValidationError({"target_day": "This plan is not available to you."})
+        # Do not allow replace if target has protected items
+        if mode == "replace":
+            if target.items.filter(execution__isnull=False).exists() or target.items.filter(report_items__isnull=False).exists():
+                return Response({"detail": "این روز دارای عملکرد ثبت‌شده است و قابل جایگزینی نیست.", "code": "PROTECTED_TARGET"}, status=status.HTTP_409_CONFLICT)
+        # Time overlap validation helper
+        def _overlaps(a_s, a_e, b_s, b_e):
+            if not a_s or not a_e or not b_s or not b_e:
+                return False
+            return a_s < b_e and a_e > b_s
+        existing = list(target.items.select_for_update().all())
+        source_items = list(source.items.order_by("ordering", "pk"))
+        # Check that source day itself is not protected for copying? copying protected items is allowed but they lose execution
+        # Validate timed overlaps
+        # 1) source timed items that overlap each other? they already coexist on source, skip
+        # 2) source timed vs existing timed
+        # 3) source timed vs fixed commitments
+        from apps.planning.models import StudentFixedCommitment
+        weekday = target.date.weekday()
+        commitments = list(StudentFixedCommitment.objects.filter(student_id=target.plan.student_id, active=True, weekday=weekday))
+        # Build lists of timed intervals
+        def collect_times(items):
+            out=[]
+            for it in items:
+                if it.start_time and it.end_time:
+                    out.append((it.start_time, it.end_time, it))
+            return out
+        existing_times = collect_times(existing)
+        source_times = collect_times(source_items)
+        # When appending, check source_times vs existing_times
+        if mode == "append":
+            for s_s, s_e, s_it in source_times:
+                for e_s, e_e, _ in existing_times:
+                    if _overlaps(s_s, s_e, e_s, e_e):
+                        return Response({"detail": "این زمان با فعالیت موجود در روز مقصد تداخل دارد.", "code": "COPY_CONFLICT", "conflict_start": s_s.isoformat(), "conflict_end": s_e.isoformat()}, status=status.HTTP_409_CONFLICT)
+                for comm in commitments:
+                    if _overlaps(s_s, s_e, comm.start_time, comm.end_time):
+                        return Response({"detail": "این بازه با تعهد ثابت دانش‌آموز تداخل دارد.", "code": "COMMITMENT_CONFLICT"}, status=status.HTTP_409_CONFLICT)
+        # When replacing, only need to check source vs commitments (existing will be deleted)
+        if mode == "replace":
+            for s_s, s_e, _ in source_times:
+                for comm in commitments:
+                    if _overlaps(s_s, s_e, comm.start_time, comm.end_time):
+                        return Response({"detail": "این بازه با تعهد ثابت دانش‌آموز تداخل دارد.", "code": "COMMITMENT_CONFLICT"}, status=status.HTTP_409_CONFLICT)
+        # Also check internal source timed overlap among themselves is valid (should be, but validate)
+        # Perform copy atomically
+        if mode == "replace":
+            # Delete existing items (they are not protected per above check)
+            target.items.all().delete()
+            # Reset ordering base
+            existing = []
+        # Compute ordering base
+        max_order = -1
+        if existing:
+            max_order = max(i.ordering for i in existing)
+        # Copy each source item with new id, preserving fields but not execution/report
+        # For append, offset copied ordering after existing max
+        base = (max(i.ordering for i in existing) + 1) if existing else 0
+        for src in source_items:
+            created = copy_item(src, target)
+            # offset ordering to append
+            if existing:
+                PlanItem.objects.filter(pk=created.pk).update(ordering=base + src.ordering)
+        # Re-normalize ordering for target after copy
+        all_items = list(target.items.order_by("ordering", "pk"))
+        for new_idx, it in enumerate(sorted(all_items, key=lambda x: (x.ordering, x.pk))):
+            if it.ordering != new_idx:
+                PlanItem.objects.filter(pk=it.pk).update(ordering=new_idx)
+        target = PlanDay.objects.prefetch_related(Prefetch("items", queryset=PlanItem.objects.select_related("subject", "chapter", "topic", "execution").prefetch_related("report_items").order_by("ordering", "pk"))).get(pk=target.pk)
+        return Response(PlanDayDetailSerializer(target, context=self.get_serializer_context()).data)
+
     @action(detail=True, methods=("post",), url_path="reorder")
     @transaction.atomic
     def reorder(self, request, pk=None):
         day = self.get_object()
-        if day.date < timezone.localdate():
-            return Response({"detail": "روزهای گذشته فقط قابل مشاهده هستند."}, status=status.HTTP_400_BAD_REQUEST)
         if day.plan.status == Plan.Status.PUBLISHED:
             # allow reordering draft? published plan structural change? check current policy - allow if editable
             # mimic existing check: published plan title only can change but days/items editable unless locked; we allow reorder if day editable
@@ -255,6 +337,11 @@ class DuplicateDaySerializer(serializers.Serializer):
     target_plan = serializers.PrimaryKeyRelatedField(queryset=Plan.objects.all(), required=False)
 
 
+class CopyDaySerializer(serializers.Serializer):
+    target_day = serializers.IntegerField()
+    mode = serializers.ChoiceField(choices=["append", "replace"], required=False, default="append")
+
+
 def copy_item(source, target_day):
     return PlanItem.objects.create(
         plan_day=target_day, kind=source.kind, ordering=source.ordering, title=source.title,
@@ -267,6 +354,20 @@ def copy_item(source, target_day):
 class MoveItemSerializer(serializers.Serializer):
     target_day = serializers.IntegerField()
     ordering = serializers.IntegerField(required=False, min_value=0)
+    start_time = serializers.TimeField(required=False, allow_null=True)
+    end_time = serializers.TimeField(required=False, allow_null=True)
+    planned_duration_minutes = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+
+    def validate(self, attrs):
+        st = attrs.get("start_time")
+        en = attrs.get("end_time")
+        if (st is None) != (en is None):
+            # allow only one null -> both must be provided together if any time change requested
+            if st is not None or en is not None:
+                raise serializers.ValidationError({"end_time": "Start and end times must be supplied together."})
+        if st and en and en <= st:
+            raise serializers.ValidationError({"end_time": "End time must be after start time."})
+        return attrs
 
 
 class PlanItemViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
@@ -317,8 +418,6 @@ class PlanItemViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
         # check lock
         if hasattr(source, "execution") or source.report_items.exists():
             return Response({"detail": "این باکس توسط دانش‌آموز شروع یا ثبت شده و قابل تکثیر نیست."}, status=status.HTTP_409_CONFLICT)
-        if source.plan_day.date < timezone.localdate():
-            return Response({"detail": "روزهای گذشته فقط قابل مشاهده هستند."}, status=status.HTTP_400_BAD_REQUEST)
         if not manageable_plan(source.plan_day.plan, request.user):
             raise serializers.ValidationError({"detail": "This plan is not available to you."})
         # target is same day by default
@@ -332,8 +431,6 @@ class PlanItemViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
                 raise serializers.ValidationError({"target_day": "This day does not exist."})
             if candidate.plan_id != source.plan_day.plan_id:
                 raise serializers.ValidationError({"target_day": "Target day must belong to same plan."})
-            if candidate.date < timezone.localdate():
-                raise serializers.ValidationError({"target_day": "نمی‌توان به روز گذشته منتقل کرد."})
             target_day = candidate
         max_order = target_day.items.aggregate(models.Max("ordering"))["ordering__max"]
         next_order = (max_order + 1) if max_order is not None else 0
@@ -349,44 +446,89 @@ class PlanItemViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
         item = self.get_object()
         if hasattr(item, "execution") or item.report_items.exists():
             return Response({"detail": "این باکس توسط دانش‌آموز شروع یا ثبت شده و قابل جابه‌جایی نیست."}, status=status.HTTP_409_CONFLICT)
-        if item.plan_day.date < timezone.localdate():
-            return Response({"detail": "روزهای گذشته فقط قابل مشاهده هستند."}, status=status.HTTP_400_BAD_REQUEST)
         payload = MoveItemSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
         try:
-            target_day = PlanDay.objects.get(pk=payload.validated_data["target_day"])
+            target_day = PlanDay.objects.select_for_update().get(pk=payload.validated_data["target_day"])
         except PlanDay.DoesNotExist:
             raise serializers.ValidationError({"target_day": "This day does not exist."})
         if target_day.plan_id != item.plan_day.plan_id:
             raise serializers.ValidationError({"target_day": "Target day must belong to same plan."})
-        if target_day.date < timezone.localdate():
-            raise serializers.ValidationError({"target_day": "نمی‌توان به روز گذشته منتقل کرد."})
         if not manageable_plan(target_day.plan, request.user):
             raise serializers.ValidationError({"target_day": "This plan is not available to you."})
-        if target_day.items.filter(execution__isnull=False).exists() or target_day.items.filter(report_items__isnull=False).exists():
-            # we still allow move if target locked? reject for safety
-            pass
+        new_start = payload.validated_data.get("start_time", None)
+        new_end = payload.validated_data.get("end_time", None)
+        new_duration = payload.validated_data.get("planned_duration_minutes", None)
+        has_time_change = "start_time" in payload.validated_data or "end_time" in payload.validated_data
+        has_duration_change = "planned_duration_minutes" in payload.validated_data
+        item = PlanItem.objects.select_for_update().get(pk=item.pk)
+        effective_start = new_start if has_time_change else item.start_time
+        effective_end = new_end if has_time_change else item.end_time
+        effective_duration = new_duration if has_duration_change else item.planned_duration_minutes
+        if has_time_change and effective_start and not effective_end and effective_duration:
+            from datetime import datetime, timedelta
+            dt_start = datetime.combine(target_day.date, effective_start)
+            dt_end = dt_start + timedelta(minutes=effective_duration)
+            effective_end = dt_end.time()
+        if has_duration_change and effective_start and effective_duration and not has_time_change:
+            from datetime import datetime, timedelta
+            dt_start = datetime.combine(target_day.date, effective_start)
+            dt_end = dt_start + timedelta(minutes=effective_duration)
+            effective_end = dt_end.time()
+        if item.kind != PlanItem.Kind.EVENT and not effective_duration:
+            raise serializers.ValidationError({"planned_duration_minutes": "Duration is required for this item type."})
+        if (effective_start is None) != (effective_end is None):
+            raise serializers.ValidationError({"end_time": "Start and end times must be supplied together."})
+        if effective_start and effective_end and effective_end <= effective_start:
+            raise serializers.ValidationError({"end_time": "End time must be after start time."})
+        if effective_start and effective_end:
+            def _overlaps(a_s, a_e, b_s, b_e):
+                if not a_s or not a_e or not b_s or not b_e:
+                    return False
+                return a_s < b_e and a_e > b_s
+            other_items = list(target_day.items.select_for_update().exclude(pk=item.pk).filter(start_time__isnull=False, end_time__isnull=False))
+            for other in other_items:
+                if _overlaps(effective_start, effective_end, other.start_time, other.end_time):
+                    return Response({"detail": "این زمان با فعالیت دیگری تداخل دارد.", "code": "MOVE_CONFLICT"}, status=status.HTTP_409_CONFLICT)
+            try:
+                from apps.planning.models import StudentFixedCommitment
+                weekday = target_day.date.weekday()
+                commitments = StudentFixedCommitment.objects.filter(student_id=target_day.plan.student_id, active=True, weekday=weekday)
+                for comm in commitments:
+                    if _overlaps(effective_start, effective_end, comm.start_time, comm.end_time):
+                        return Response({"detail": "این بازه با کلاس/مدرسه/تعهد ثابت دانش‌آموز تداخل دارد.", "code": "COMMITMENT_CONFLICT"}, status=status.HTTP_409_CONFLICT)
+            except Exception:
+                pass
         desired = payload.validated_data.get("ordering")
-        # fetch ordered list for target
-        items = list(target_day.items.order_by("ordering", "pk"))
-        # if moving within same day, remove from list first
-        if target_day.pk == item.plan_day_id:
-            items = [i for i in items if i.pk != item.pk]
-        if desired is None or desired > len(items):
-            desired = len(items)
-        # insert
-        items.insert(desired, item)
-        # update ordering and plan_day
-        for idx, entry in enumerate(items):
+        original_day_id = item.plan_day_id
+        item.plan_day = target_day
+        if has_time_change:
+            item.start_time = effective_start
+            item.end_time = effective_end
+        if has_duration_change:
+            item.planned_duration_minutes = effective_duration
+        items = list(target_day.items.exclude(pk=item.pk).order_by("ordering", "pk"))
+        if desired is not None:
+            idx = min(max(0, desired), len(items))
+        else:
+            idx = len(items)
+        items.insert(idx, item)
+        try:
+            item.full_clean()
+        except DjangoValidationError as error:
+            raise serializers.ValidationError(error.message_dict if hasattr(error, "message_dict") else error.messages) from error
+        item.save()
+        for new_idx, entry in enumerate(items):
             if entry.pk == item.pk:
-                PlanItem.objects.filter(pk=entry.pk).update(plan_day=target_day, ordering=idx)
+                PlanItem.objects.filter(pk=entry.pk).update(ordering=new_idx)
             else:
-                PlanItem.objects.filter(pk=entry.pk).update(ordering=idx)
-        # also compact source day if different
-        if target_day.pk != item.plan_day_id:
-            source_items = list(PlanDay.objects.get(pk=item.plan_day_id).items.order_by("ordering", "pk"))
-            for idx, entry in enumerate(source_items):
-                PlanItem.objects.filter(pk=entry.pk).update(ordering=idx)
+                if entry.ordering != new_idx:
+                    PlanItem.objects.filter(pk=entry.pk).update(ordering=new_idx)
+        if target_day.pk != original_day_id:
+            source_items = list(PlanDay.objects.get(pk=original_day_id).items.order_by("ordering", "pk"))
+            for new_idx, entry in enumerate(source_items):
+                if entry.ordering != new_idx:
+                    PlanItem.objects.filter(pk=entry.pk).update(ordering=new_idx)
         item.refresh_from_db()
         return Response(PlanItemSerializer(item, context=self.get_serializer_context()).data)
 

@@ -66,6 +66,9 @@ class TelegramStudentConnection(models.Model):
     telegram_username = models.CharField(max_length=64, blank=True, null=True)
     telegram_first_name = models.CharField(max_length=255, blank=True, null=True)
     is_active = models.BooleanField(default=True)
+    is_enabled = models.BooleanField(default=True)
+    is_suspended = models.BooleanField(default=False)
+    is_banned = models.BooleanField(default=False)
     connected_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -82,6 +85,32 @@ class TelegramStudentConnection(models.Model):
 
     def __str__(self) -> str:
         return f"User {self.telegram_user_id} -> Student {self.student_id}"
+
+
+class TelegramAdminActionLog(models.Model):
+    class Action(models.TextChoices):
+        ENABLE = "ENABLE", "Enable"
+        DISABLE = "DISABLE", "Disable"
+        SUSPEND = "SUSPEND", "Suspend"
+        RESUME = "RESUME", "Resume"
+        BAN = "BAN", "Ban"
+        UNBAN = "UNBAN", "Unban"
+        GROUP_LOCK = "GROUP_LOCK", "Group lock"
+        GROUP_UNLOCK = "GROUP_UNLOCK", "Group unlock"
+        RESEND_PLAN = "RESEND_PLAN", "Resend plan"
+
+    actor = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, related_name="telegram_admin_actions")
+    student = models.ForeignKey("accounts.StudentProfile", on_delete=models.CASCADE, related_name="telegram_admin_logs")
+    group_connection = models.ForeignKey(TelegramGroupConnection, on_delete=models.SET_NULL, null=True, blank=True)
+    action = models.CharField(max_length=20, choices=Action.choices)
+    reason = models.CharField(max_length=500, blank=True)
+    success = models.BooleanField(default=True)
+    details = models.JSONField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        verbose_name = "Telegram Admin Action Log"
 
 
 class TelegramConnectionToken(models.Model):

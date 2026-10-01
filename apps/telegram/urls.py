@@ -4,6 +4,7 @@ from .views_internal import group_confirm, group_resolve, student_confirm
 from .views_plan import plan_by_date, plan_excel, plan_pdf, plan_today, plan_tomorrow, plan_week
 from .views_report import report_extra_activity, report_finalize, report_patch, report_today_view, report_yesterday
 from .views_subjects import telegram_subjects
+from .views_progress import progress_today, progress_7days
 
 urlpatterns = [
     path("internal/v1/telegram/connections/group/confirm/", group_confirm, name="telegram-group-confirm"),
@@ -23,4 +24,6 @@ urlpatterns = [
     path("internal/v1/telegram/report/yesterday/", report_yesterday, name="telegram-report-yesterday"),
     path("internal/v1/telegram/report/extra-activity/", report_extra_activity, name="telegram-report-extra"),
     path("internal/v1/telegram/report/subjects/", telegram_subjects, name="telegram-subjects"),
+    path("internal/v1/telegram/progress/today/", progress_today, name="telegram-progress-today"),
+    path("internal/v1/telegram/progress/7-days/", progress_7days, name="telegram-progress-7days"),
 ]

@@ -47,6 +47,13 @@ def _resolve_student(request) -> tuple[StudentProfile | None, Response | None]:
         return None, Response({"detail": "Student inactive.", "code": "inactive"}, status=status.HTTP_403_FORBIDDEN)
     if not conn.is_active or not group.is_active:
         return None, Response({"detail": "Connection inactive.", "code": "inactive"}, status=status.HTTP_403_FORBIDDEN)
+    # Central access guard — keep this after _resolve_student's identity checks so ordering stays stable
+    if not conn.is_enabled:
+        return None, Response({"detail": "دسترسی تلگرام شما در حال حاضر غیرفعال است.", "code": "telegram_disabled"}, status=status.HTTP_403_FORBIDDEN)
+    if conn.is_suspended:
+        return None, Response({"detail": "دسترسی تلگرام شما موقتاً تعلیق شده است.", "code": "telegram_suspended"}, status=status.HTTP_403_FORBIDDEN)
+    if conn.is_banned:
+        return None, Response({"detail": "دسترسی تلگرام شما محدود شده است.", "code": "telegram_banned"}, status=status.HTTP_403_FORBIDDEN)
     return student, None
 
 

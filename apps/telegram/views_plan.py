@@ -29,6 +29,20 @@ def _resolve_student(request) -> tuple[StudentProfile | None, Response | None]:
         user_id = int(user_raw)
     except (ValueError, TypeError):
         return None, Response({"detail": "Invalid telegram ids.", "code": "invalid_identity"}, status=status.HTTP_400_BAD_REQUEST)
+    # A private Telegram chat has the sender's user id. Resolve its existing
+    # binding on the backend; never infer a student from client-supplied ids.
+    if chat_id > 0 and chat_id == user_id:
+        private_connection = TelegramStudentConnection.objects.filter(
+            telegram_user_id=user_id, is_active=True,
+        ).first()
+        if private_connection is None:
+            return None, Response({"detail": "Telegram account is not connected.", "code": "not_connected"}, status=status.HTTP_403_FORBIDDEN)
+        private_group = TelegramGroupConnection.objects.filter(
+            student=private_connection.student, is_active=True,
+        ).first()
+        if private_group is None:
+            return None, Response({"detail": "Telegram group is not connected.", "code": "unknown_group"}, status=status.HTTP_403_FORBIDDEN)
+        chat_id = private_group.telegram_chat_id
     # Group must exist and be active
     try:
         group = TelegramGroupConnection.objects.select_related("student__user").get(telegram_chat_id=chat_id, is_active=True)

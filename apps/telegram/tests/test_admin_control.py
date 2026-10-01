@@ -123,6 +123,7 @@ class AdminControlTests(APITestCase):
         self.assertTrue(log.success)
         self.assertEqual(log.actor_id, self.admin.pk)
 
+    @override_settings(TELEGRAM_BOT_CONTROL_BASE_URL="", TELEGRAM_BOT_CONTROL_TOKEN="")
     def test_bot_unavailable_does_not_break_status(self):
         # No BOT_CONTROL configured by default in test, so reachable false but status 200
         self.client.force_authenticate(self.admin)

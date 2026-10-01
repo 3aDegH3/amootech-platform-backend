@@ -133,3 +133,26 @@ class TelegramPlanApiTests(APITestCase):
         resp = self.client.get("/api/internal/v1/telegram/plan/day/", {**self._svc_params(), "date": self.today.isoformat()}, **self.svc)
         self.assertEqual(resp.status_code, 200, resp.data)
         self.assertEqual(resp.data["date"], self.today.isoformat())
+
+    def test_private_chat_resolves_existing_binding_and_enforces_access(self):
+        params = {"telegram_chat_id": self.user_id, "telegram_user_id": self.user_id}
+        response = self.client.get("/api/internal/v1/telegram/plan/today/", params, **self.svc)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["has_plan"])
+        for flag,code in [("is_enabled", "telegram_disabled"), ("is_suspended", "telegram_suspended"), ("is_banned", "telegram_banned")]:
+            connection = TelegramStudentConnection.objects.get(student=self.student, is_active=True)
+            setattr(connection, flag, flag != "is_enabled"); connection.save()
+            response = self.client.get("/api/internal/v1/telegram/plan/today/", params, **self.svc)
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.data["code"], code)
+            setattr(connection, flag, flag == "is_enabled"); connection.save()
+        TelegramGroupConnection.objects.filter(student=self.student).update(is_active=False)
+        self.assertEqual(self.client.get("/api/internal/v1/telegram/plan/today/", params, **self.svc).status_code, 403)
+
+    def test_private_chat_cannot_impersonate_another_user(self):
+        params = {"telegram_chat_id": self.user_id, "telegram_user_id": self.user_id + 1}
+        self.assertEqual(self.client.get("/api/internal/v1/telegram/plan/today/", params, **self.svc).status_code, 403)
+        params = {"telegram_chat_id": self.user_id + 1, "telegram_user_id": self.user_id + 1}
+        response = self.client.get("/api/internal/v1/telegram/plan/today/", params, **self.svc)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.data["code"], "not_connected")

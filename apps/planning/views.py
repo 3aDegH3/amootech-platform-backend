@@ -326,6 +326,8 @@ class PlanDayViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
         # enforce manageable_plan
         if not manageable_plan(day.plan, request.user):
             raise serializers.ValidationError({"detail": "This plan is not available to you."})
+        from apps.telegram.automation import refresh_after_commit
+        refresh_after_commit(day.plan)
         for index, item_id in enumerate(ids):
             PlanItem.objects.filter(pk=item_id, plan_day=day).update(ordering=index)
         day = PlanDay.objects.prefetch_related(Prefetch("items", queryset=PlanItem.objects.select_related("subject", "chapter", "topic", "execution").prefetch_related("report_items").order_by("ordering", "pk"))).get(pk=day.pk)

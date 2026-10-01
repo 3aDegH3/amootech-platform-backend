@@ -2,6 +2,8 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import F, Q
 
+from apps.core.sources import MutationSource
+
 
 class Plan(models.Model):
     class Status(models.TextChoices):
@@ -117,6 +119,8 @@ class PlanItem(models.Model):
 
 
 class PlanItemExecution(models.Model):
+    source = models.CharField(max_length=8, choices=MutationSource.choices, default=MutationSource.WEB)
+
     class Status(models.TextChoices):
         IN_PROGRESS = "IN_PROGRESS", "In progress"
         PAUSED = "PAUSED", "Paused"

@@ -38,7 +38,7 @@ def active_conflict(student, item):
 
 
 @transaction.atomic
-def transition(user, item_id, action, *, complete=None):
+def transition(user, item_id, action, *, complete=None, source="WEB"):
     item = student_item(user, item_id)
     # Lock the owner row before looking for execution records. This also serializes
     # starts of different items when neither item has an execution row yet.
@@ -46,6 +46,9 @@ def transition(user, item_id, action, *, complete=None):
     execution = PlanItemExecution.objects.select_for_update().filter(plan_item=item).first()
     now = timezone.now()
     status = PlanItemExecution.Status
+
+    if execution is not None:
+        execution.source = source
 
     if action == "start":
         from apps.daily_reports.models import DailyReport
@@ -56,37 +59,39 @@ def transition(user, item_id, action, *, complete=None):
         if execution is None:
             active_conflict(student, item)
             return PlanItemExecution.objects.create(
-                student=student, plan_item=item, status=status.IN_PROGRESS,
+                student=student, plan_item=item, source=source, status=status.IN_PROGRESS,
                 started_at=now, current_session_started_at=now,
             )
         if execution.status == status.IN_PROGRESS:
+            execution.save(update_fields=("source",))
             return execution  # Repeated Start is harmless.
         raise ValidationError({"detail": "این فعالیت قبلاً شروع شده است. برای ادامه از «ادامه» استفاده کنید."})
 
     if action == "quick_complete":
         if execution is None:
             return PlanItemExecution.objects.create(
-                student=student, plan_item=item, status=status.COMPLETED, completed_at=now,
+                student=student, plan_item=item, source=source, status=status.COMPLETED, completed_at=now,
             )
         if execution.status == status.COMPLETED:
+            execution.save(update_fields=("source",))
             return execution  # Repeated click is harmless.
         if execution.status == status.IN_PROGRESS:
             execution.accumulated_seconds = execution.elapsed_seconds(now)
         execution.current_session_started_at = None
         execution.completed_at = now
         execution.status = status.COMPLETED
-        execution.save(update_fields=("status", "accumulated_seconds", "current_session_started_at", "completed_at"))
+        execution.save(update_fields=("source", "status", "accumulated_seconds", "current_session_started_at", "completed_at"))
         return execution
 
     if action == "set_partial":
         if execution is None:
-            return PlanItemExecution.objects.create(student=student, plan_item=item, status=status.PARTIAL, completed_at=now)
+            return PlanItemExecution.objects.create(student=student, plan_item=item, source=source, status=status.PARTIAL, completed_at=now)
         if execution.status == status.IN_PROGRESS:
             execution.accumulated_seconds = execution.elapsed_seconds(now)
         execution.current_session_started_at = None
         execution.completed_at = now
         execution.status = status.PARTIAL
-        execution.save(update_fields=("status", "accumulated_seconds", "current_session_started_at", "completed_at"))
+        execution.save(update_fields=("source", "status", "accumulated_seconds", "current_session_started_at", "completed_at"))
         return execution
 
     if action == "mark_not_done":
@@ -99,10 +104,10 @@ def transition(user, item_id, action, *, complete=None):
         if has_performance:
             raise ValidationError({"detail": "برای این فعالیت عملکرد ثبت شده است. ابتدا عملکرد را ویرایش کنید."})
         if execution is None:
-            return PlanItemExecution.objects.create(student=student, plan_item=item, status=status.NOT_DONE, completed_at=now)
+            return PlanItemExecution.objects.create(student=student, plan_item=item, source=source, status=status.NOT_DONE, completed_at=now)
         execution.status = status.NOT_DONE
         execution.completed_at = now
-        execution.save(update_fields=("status", "completed_at"))
+        execution.save(update_fields=("source", "status", "completed_at"))
         return execution
 
     if execution is None:
@@ -130,5 +135,5 @@ def transition(user, item_id, action, *, complete=None):
         execution.status = status.COMPLETED if complete else status.PARTIAL
     else:
         raise ValueError(f"Unknown execution action: {action}")
-    execution.save(update_fields=("status", "accumulated_seconds", "current_session_started_at", "completed_at"))
+    execution.save(update_fields=("source", "status", "accumulated_seconds", "current_session_started_at", "completed_at"))
     return execution

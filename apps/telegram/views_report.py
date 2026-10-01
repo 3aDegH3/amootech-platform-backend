@@ -8,7 +8,7 @@ from rest_framework.response import Response
 
 from apps.accounts.models import StudentProfile
 from apps.daily_reports.models import DailyReport, DailyReportItem
-from apps.daily_reports.services import open_report, report_payload, report_today
+from apps.daily_reports.services import close_day_review, open_report, report_payload, report_today
 from apps.daily_reports.views import DailyReportViewSet
 from apps.planning.models import Plan, PlanDay, PlanItem, PlanItemExecution
 
@@ -33,15 +33,7 @@ def report_today_view(request):
         raise
     payload = report_payload(report)
     # Add unresolved items for finalize guard (reuse logic)
-    items = list(PlanItem.objects.filter(plan_day__plan__student=student, plan_day__plan__status="PUBLISHED", plan_day__date=today).select_related("subject", "chapter", "topic").order_by("ordering", "pk"))
-    exec_map = {e.plan_item_id: e for e in PlanItemExecution.objects.filter(student=student, plan_item_id__in=[i.pk for i in items])}
-    unresolved = []
-    for it in items:
-        if it.kind == PlanItem.Kind.EVENT:
-            continue
-        st = exec_map.get(it.pk).status if exec_map.get(it.pk) else "NOT_STARTED"
-        if st not in (PlanItemExecution.Status.COMPLETED, PlanItemExecution.Status.PARTIAL, PlanItemExecution.Status.NOT_DONE):
-            unresolved.append({"id": it.pk, "title": it.title or (it.topic.name if it.topic_id else it.subject.name if it.subject_id else ""), "kind": it.kind})
+    unresolved = close_day_review(student, today)["unresolved"]
     payload["unresolved_items"] = unresolved
     payload["finalized"] = bool(payload.get("closed_at"))
     payload["unresolved"] = unresolved
@@ -51,6 +43,7 @@ def report_today_view(request):
 @api_view(["PATCH"])
 @authentication_classes([])
 @permission_classes([ServiceTokenPermission])
+@transaction.atomic
 def report_patch(request):
     student, err = _resolve_student(request)
     if err:
@@ -71,32 +64,32 @@ def report_patch(request):
     from apps.daily_reports.serializers import DailyFieldsSerializer
     ser = DailyFieldsSerializer(report, data=data, partial=True)
     ser.is_valid(raise_exception=True)
-    ser.save()
+    ser.save(source="TELEGRAM")
     return Response(report_payload(report))
 
 
 @api_view(["POST"])
 @authentication_classes([])
 @permission_classes([ServiceTokenPermission])
+@transaction.atomic
 def report_finalize(request):
     student, err = _resolve_student(request)
     if err:
         return err
     today = report_today()
-    # Find report
+    # Serialize finalization with existing website and execution writes.
+    StudentProfile.objects.select_for_update().get(pk=student.pk)
     try:
-        report = DailyReport.objects.get(student=student, date=today)
+        report = DailyReport.objects.select_for_update().get(student=student, date=today)
     except DailyReport.DoesNotExist:
         return Response({"detail": "No report.", "code": "no_report"}, status=status.HTTP_404_NOT_FOUND)
     if report.closed_at:
         # Idempotent
         return Response({"detail": "Already finalized.", "closed_at": report.closed_at.isoformat()}, status=status.HTTP_200_OK)
     # Check unresolved
-    items = list(PlanItem.objects.filter(plan_day__plan__student=student, plan_day__plan__status="PUBLISHED", plan_day__date=today).select_related("subject", "chapter", "topic"))
-    exec_map = {e.plan_item_id: e for e in PlanItemExecution.objects.filter(student=student, plan_item_id__in=[i.pk for i in items])}
-    unresolved = [it for it in items if it.kind != PlanItem.Kind.EVENT and (exec_map.get(it.pk).status if exec_map.get(it.pk) else None) not in (PlanItemExecution.Status.COMPLETED, PlanItemExecution.Status.PARTIAL, PlanItemExecution.Status.NOT_DONE)]
+    unresolved = close_day_review(student, today)["unresolved"]
     if unresolved:
-        return Response({"detail": "Unresolved items remain.", "code": "unresolved", "unresolved": [{"id": it.pk, "title": it.title or ""} for it in unresolved]}, status=status.HTTP_409_CONFLICT)
+        return Response({"detail": "Unresolved items remain.", "code": "unresolved", "unresolved": unresolved}, status=status.HTTP_409_CONFLICT)
     # Validate self_rating/note required by CloseDaySerializer? But for Telegram we allow finalize even if not yet provided? Follow domain: close requires self_rating and note
     # Try to close using existing view logic — it expects date + self_rating + note
     # For Telegram, if not provided, use defaults? Instead call directly like the ViewSet does
@@ -121,10 +114,11 @@ def report_finalize(request):
     ser = CloseDaySerializer(data=payload)
     ser.is_valid(raise_exception=True)
     # Perform close like ViewSet
+    report.source = "TELEGRAM"
     report.self_rating = ser.validated_data["self_rating"]
     report.note = ser.validated_data["note"]
     report.closed_at = timezone.now()
-    report.save(update_fields=["self_rating", "note", "closed_at", "updated_at"])
+    report.save(update_fields=["self_rating", "note", "closed_at", "updated_at", "source"])
     return Response({"detail": "Finalized.", "closed_at": report.closed_at.isoformat(), "report": report_payload(report)})
 
 
@@ -148,6 +142,7 @@ def report_yesterday(request):
 @api_view(["POST"])
 @authentication_classes([])
 @permission_classes([ServiceTokenPermission])
+@transaction.atomic
 def report_extra_activity(request):
     student, err = _resolve_student(request)
     if err:
@@ -202,6 +197,7 @@ def report_extra_activity(request):
     )
     # Handle completion_status if present (not in Unplanned but handle)
     try:
+        item.source = "TELEGRAM"
         item.save()
     except Exception as exc:
         from django.core.exceptions import ValidationError as DjangoValidationError

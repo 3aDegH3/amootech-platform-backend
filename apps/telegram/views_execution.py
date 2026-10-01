@@ -1,5 +1,6 @@
 from datetime import date
 
+from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers, status
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
@@ -72,6 +73,7 @@ def execution_today(request):
             "planned_duration_minutes": it.planned_duration_minutes,
             "planned_test_count": it.test_count,
             "execution_status": exe.status if exe else "PENDING",
+            "source": exe.source if exe else None,
             "actual_duration_minutes": row.actual_duration_minutes if row else None,
             "actual_test_count": row.actual_test_count if row else None,
             "correct_count": row.correct_count if row else None,
@@ -85,6 +87,7 @@ def execution_today(request):
 @api_view(["POST", "PATCH"])
 @authentication_classes([])
 @permission_classes([ServiceTokenPermission])
+@transaction.atomic
 def execution_update(request):
     student, err = _resolve_student(request)
     if err:
@@ -107,17 +110,18 @@ def execution_update(request):
     user = student.user
     try:
         if req_status == "COMPLETED":
-            exe = transition(user, plan_item_id, "quick_complete")
+            exe = transition(user, plan_item_id, "quick_complete", source="TELEGRAM")
         elif req_status == "PARTIAL":
-            exe = transition(user, plan_item_id, "set_partial")
+            exe = transition(user, plan_item_id, "set_partial", source="TELEGRAM")
         elif req_status == "NOT_DONE":
-            exe = transition(user, plan_item_id, "mark_not_done")
+            exe = transition(user, plan_item_id, "mark_not_done", source="TELEGRAM")
         else:
             return Response({"detail": "Invalid status."}, status=status.HTTP_400_BAD_REQUEST)
     except Exception as exc:
         # Map ValidationError / ActiveTimerConflict
         from rest_framework.exceptions import ValidationError as DRFValidationError, APIException
         if isinstance(exc, DRFValidationError):
+            transaction.set_rollback(True)
             return Response({"detail": exc.detail if hasattr(exc, 'detail') else str(exc), "code": "validation_error"}, status=status.HTTP_400_BAD_REQUEST)
         if isinstance(exc, APIException):
             detail = getattr(exc, 'detail', str(exc))
@@ -142,6 +146,7 @@ def execution_update(request):
         except Exception as exc:
             from rest_framework.exceptions import ValidationError as DRFValidationError
             if isinstance(exc, DRFValidationError):
+                transaction.set_rollback(True)
                 return Response({"detail": exc.detail if hasattr(exc, 'detail') else str(exc)}, status=status.HTTP_400_BAD_REQUEST)
             raise
         # Get or create report item for this plan_item
@@ -177,15 +182,18 @@ def execution_update(request):
             row.wrong_count = None
             row.unanswered_count = None
         try:
+            row.source = "TELEGRAM"
             row.save()
         except Exception as exc:
             from django.core.exceptions import ValidationError as DjangoValidationError
             if isinstance(exc, DjangoValidationError):
+                transaction.set_rollback(True)
                 return Response({"detail": exc.message_dict if hasattr(exc, 'message_dict') else str(exc)}, status=status.HTTP_400_BAD_REQUEST)
             # Also DRF ValidationError from full_clean
             from rest_framework.exceptions import ValidationError as DRFValidationError2
             if isinstance(exc, DRFValidationError2):
+                transaction.set_rollback(True)
                 return Response({"detail": exc.detail}, status=status.HTTP_400_BAD_REQUEST)
             raise
 
-    return Response({"status": exe.status, "plan_item_id": plan_item_id, "execution_status": exe.status})
+    return Response({"source": exe.source, "status": exe.status, "plan_item_id": plan_item_id, "execution_status": exe.status})

@@ -6,7 +6,11 @@ from .views_report import report_extra_activity, report_finalize, report_patch, 
 from .views_subjects import telegram_subjects
 from .views_progress import progress_today, progress_7days
 
+from .automation import morning_recipients, end_of_day_recipients
+
 urlpatterns = [
+    path("internal/v1/telegram/automation/morning-recipients/", morning_recipients),
+    path("internal/v1/telegram/automation/end-of-day-recipients/", end_of_day_recipients),
     path("internal/v1/telegram/connections/group/confirm/", group_confirm, name="telegram-group-confirm"),
     path("internal/v1/telegram/connections/group/resolve/", group_resolve, name="telegram-group-resolve"),
     path("internal/v1/telegram/connections/student/confirm/", student_confirm, name="telegram-student-confirm"),

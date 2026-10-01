@@ -2,6 +2,8 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
 
+from apps.core.sources import MutationSource
+
 from apps.planning.models import PlanItem
 
 
@@ -30,6 +32,8 @@ def conflicting_activity(report, start, end, exclude_id=None):
 
 
 class DailyReport(models.Model):
+    source = models.CharField(max_length=8, choices=MutationSource.choices, default=MutationSource.WEB)
+
     student = models.ForeignKey("accounts.StudentProfile", on_delete=models.CASCADE, related_name="daily_reports")
     date = models.DateField()
     wake_time = models.TimeField(null=True, blank=True)
@@ -54,6 +58,8 @@ class DailyReport(models.Model):
 
 
 class DailyReportItem(models.Model):
+    source = models.CharField(max_length=8, choices=MutationSource.choices, default=MutationSource.WEB)
+
     class DurationSource(models.TextChoices):
         MANUAL = "MANUAL", "Manual correction"
         PLAN = "PLAN", "Same as plan"

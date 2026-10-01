@@ -142,38 +142,8 @@ class DailyReportViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
         check_editable(report.date)
 
     def _close_review(self, report):
-        items = list(PlanItem.objects.filter(
-            plan_day__plan__student=report.student,
-            plan_day__plan__status="PUBLISHED",
-            plan_day__date=report.date,
-        ).select_related("subject", "chapter", "topic").order_by("ordering", "pk"))
-        executions = {row.plan_item_id: row for row in PlanItemExecution.objects.filter(
-            student=report.student, plan_item_id__in=[item.pk for item in items],
-        )}
-        unresolved = []
-        active_timer = PlanItemExecution.objects.filter(
-            student=report.student, plan_item_id__in=[item.pk for item in items],
-            status=PlanItemExecution.Status.IN_PROGRESS,
-        ).values_list("plan_item_id", flat=True).first()
-        for item in items:
-            # Events use their existing event semantics and never require an
-            # academic performance answer during end-of-day review.
-            if item.kind == PlanItem.Kind.EVENT:
-                continue
-            execution = executions.get(item.pk)
-            state = execution.status if execution else "NOT_STARTED"
-            if state not in (PlanItemExecution.Status.COMPLETED, PlanItemExecution.Status.PARTIAL, PlanItemExecution.Status.NOT_DONE):
-                unresolved.append({
-                    "id": item.pk, "kind": item.kind,
-                    "title": item.title or (item.topic.name if item.topic_id else item.subject.name if item.subject_id else item.get_kind_display()),
-                    "subject_name": item.subject.name if item.subject_id else "",
-                    "chapter_name": item.chapter.name if item.chapter_id else "",
-                    "topic_name": item.topic.name if item.topic_id else "",
-                    "planned_duration_minutes": item.planned_duration_minutes,
-                    "planned_test_count": item.test_count,
-                    "status": state,
-                })
-        return {"date": report.date.isoformat(), "unresolved": unresolved, "active_timer": active_timer}
+        from .services import close_day_review
+        return close_day_review(report.student, report.date)
 
     def _enforce_target_date(self, report, raw_date):
         if raw_date in (None, ""):
@@ -209,12 +179,13 @@ class DailyReportViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
             raise serializers.ValidationError({"detail": "یک فعالیت هنوز در حال اجراست. ابتدا آن را پایان دهید."})
         if review["unresolved"]:
             raise serializers.ValidationError({"unresolved": review["unresolved"]})
+        report.source = "WEB"
         report.self_rating = payload.validated_data["self_rating"]
         report.note = payload.validated_data["note"]
         if report.closed_at is None:
             report.closed_at = timezone.now()
         report.full_clean()
-        report.save(update_fields=("self_rating", "note", "closed_at", "updated_at"))
+        report.save(update_fields=("self_rating", "note", "closed_at", "updated_at", "source"))
         return Response(report_payload(report))
 
     @action(detail=False, methods=("post",))
@@ -232,13 +203,14 @@ class DailyReportViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
         payload = DailyFieldsSerializer(report, data=request.data, partial=True)
         payload.is_valid(raise_exception=True)
         try:
-            payload.save()
+            payload.save(source="WEB")
             report.full_clean()
         except DjangoValidationError as error:
             raise serializers.ValidationError(error.message_dict if hasattr(error, "message_dict") else error.messages) from error
         return Response(report_payload(report))
 
     def _save_item(self, item, data):
+        item.source = "WEB"
         previous_kind = item.kind
         for field, value in data.items():
             setattr(item, field, value)

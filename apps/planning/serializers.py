@@ -76,7 +76,7 @@ class PlanItemExecutionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PlanItemExecution
-        fields = ("plan_item", "status", "started_at", "current_session_started_at", "accumulated_seconds", "elapsed_seconds", "completed_at", "completion_method")
+        fields = ("plan_item", "source", "status", "started_at", "current_session_started_at", "accumulated_seconds", "elapsed_seconds", "completed_at", "completion_method")
 
     def get_elapsed_seconds(self, obj):
         return obj.elapsed_seconds(self.context.get("now") or timezone.now())

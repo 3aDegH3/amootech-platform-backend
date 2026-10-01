@@ -99,7 +99,7 @@ def report_payload(report):
                 by_subject[subject.name] = by_subject.get(subject.name, 0) + actual_duration
         total_tests += row.actual_test_count or 0
         items.append({
-            "id": row.pk, "plan_item": row.plan_item_id, "kind": kind,
+            "id": row.pk, "source": row.source, "execution_source": execution.source if execution else None, "plan_item": row.plan_item_id, "kind": kind,
             "title": planned.title if planned else row.title,
             "resource": row.resource, "note": row.note,
             "start_time": (planned.start_time if planned else row.start_time).isoformat(timespec="minutes") if (planned.start_time if planned else row.start_time) else None,
@@ -118,7 +118,7 @@ def report_payload(report):
             "execution_status": state,
         })
     return {
-        "id": report.pk, "student": report.student_id, "date": report.date.isoformat(),
+        "id": report.pk, "source": report.source, "student": report.student_id, "date": report.date.isoformat(),
         "wake_time": report.wake_time.isoformat(timespec="minutes") if report.wake_time else None,
         "sleep_time": report.sleep_time.isoformat(timespec="minutes") if report.sleep_time else None,
         "mobile_minutes": report.mobile_minutes, "self_rating": report.self_rating,
@@ -133,3 +133,38 @@ def report_payload(report):
             "by_subject": [{"name": name, "minutes": minutes} for name, minutes in by_subject.items()],
         },
     }
+
+
+def close_day_review(student, date):
+    items = list(PlanItem.objects.filter(
+        plan_day__plan__student=student,
+        plan_day__plan__status="PUBLISHED",
+        plan_day__date=date,
+    ).select_related("subject", "chapter", "topic").order_by("ordering", "pk"))
+    executions = {row.plan_item_id: row for row in PlanItemExecution.objects.filter(
+        student=student, plan_item_id__in=[item.pk for item in items],
+    )}
+    unresolved = []
+    active_timer = PlanItemExecution.objects.filter(
+        student=student, plan_item_id__in=[item.pk for item in items],
+        status=PlanItemExecution.Status.IN_PROGRESS,
+    ).values_list("plan_item_id", flat=True).first()
+    for item in items:
+        # Events use their existing event semantics and never require an
+        # academic performance answer during end-of-day review.
+        if item.kind == PlanItem.Kind.EVENT:
+            continue
+        execution = executions.get(item.pk)
+        state = execution.status if execution else "NOT_STARTED"
+        if state not in (PlanItemExecution.Status.COMPLETED, PlanItemExecution.Status.PARTIAL, PlanItemExecution.Status.NOT_DONE):
+            unresolved.append({
+                "id": item.pk, "kind": item.kind,
+                "title": item.title or (item.topic.name if item.topic_id else item.subject.name if item.subject_id else item.get_kind_display()),
+                "subject_name": item.subject.name if item.subject_id else "",
+                "chapter_name": item.chapter.name if item.chapter_id else "",
+                "topic_name": item.topic.name if item.topic_id else "",
+                "planned_duration_minutes": item.planned_duration_minutes,
+                "planned_test_count": item.test_count,
+                "status": state,
+            })
+    return {"date": date.isoformat(), "unresolved": unresolved, "active_timer": active_timer}

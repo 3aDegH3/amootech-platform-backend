@@ -121,6 +121,8 @@ def student_progress(student, days=7, include_items=False, start_date=None, end_
                 "actual_minutes": minutes,
                 "planned_tests": item.test_count, "actual_tests": row.actual_test_count if row else None,
                 "status": execution.status if execution else "NOT_STARTED",
+                "source": execution.source if execution else None,
+                "report_item_source": row.source if row else None,
                 "correct": details[0], "wrong": details[1], "unanswered": details[2],
             })
 

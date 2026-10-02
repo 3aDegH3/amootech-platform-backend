@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import date as date_type, timedelta
 
 from django.db import transaction
 from django.utils import timezone
@@ -14,6 +14,30 @@ from apps.planning.models import Plan, PlanDay, PlanItem, PlanItemExecution
 
 from .permissions import ServiceTokenPermission
 from .views_plan import _resolve_student
+
+# -- Date validation helpers for Telegram report/execution (7-day window) --
+
+def _validate_report_date(raw: str | None) -> tuple[date_type | None, Response | None]:
+    """Validate date param: YYYY-MM-DD, within [today-7, today], not future."""
+    if raw is None or raw == "":
+        return None, Response({"detail": "تاریخ الزامی است.", "code": "missing_date"}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        d = date_type.fromisoformat(raw)
+    except ValueError:
+        return None, Response({"detail": "فرمت تاریخ نامعتبر است.", "code": "invalid_date"}, status=status.HTTP_400_BAD_REQUEST)
+    today = report_today()
+    if d > today:
+        return None, Response({"detail": "تاریخ آینده قابل گزارش نیست.", "code": "future_date"}, status=status.HTTP_400_BAD_REQUEST)
+    if d < today - timedelta(days=7):
+        return None, Response({"detail": "فقط ۷ روز گذشته قابل گزارش است.", "code": "out_of_range"}, status=status.HTTP_400_BAD_REQUEST)
+    return d, None
+
+def _report_date_from_request(request) -> tuple[date_type | None, Response | None]:
+    raw = request.query_params.get("date") or (request.data.get("date") if hasattr(request, "data") else None)
+    if raw is None:
+        # Default to today for backward compat when no date param
+        return report_today(), None
+    return _validate_report_date(str(raw))
 
 
 @api_view(["GET"])
@@ -39,6 +63,35 @@ def report_today_view(request):
     payload["unresolved"] = unresolved
     return Response(payload)
 
+@api_view(["GET"])
+@authentication_classes([])
+@permission_classes([ServiceTokenPermission])
+def report_by_date(request):
+    """GET /internal/v1/telegram/report/day/?date=YYYY-MM-DD — supports today..7 days ago."""
+    student, err = _resolve_student(request)
+    if err:
+        return err
+    raw = request.query_params.get("date")
+    target, err2 = _validate_report_date(raw)
+    if err2:
+        return err2
+    assert target is not None
+    # Check published plan exists for date? Not required — report can exist without plan
+    # But we still open_report which auto-creates items from plan
+    try:
+        report = open_report(student.user, target)
+    except Exception as exc:
+        from rest_framework.exceptions import ValidationError
+        if isinstance(exc, ValidationError):
+            return Response({"detail": exc.detail if hasattr(exc, 'detail') else str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        raise
+    payload = report_payload(report)
+    unresolved = close_day_review(student, target)["unresolved"]
+    payload["unresolved_items"] = unresolved
+    payload["finalized"] = bool(payload.get("closed_at"))
+    payload["unresolved"] = unresolved
+    return Response(payload)
+
 
 @api_view(["PATCH"])
 @authentication_classes([])
@@ -48,16 +101,19 @@ def report_patch(request):
     student, err = _resolve_student(request)
     if err:
         return err
-    today = report_today()
+    target, err2 = _report_date_from_request(request)
+    if err2:
+        return err2
+    assert target is not None
     try:
-        report = open_report(student.user, today)
+        report = open_report(student.user, target)
     except Exception as exc:
         from rest_framework.exceptions import ValidationError
         if isinstance(exc, ValidationError):
             return Response({"detail": exc.detail if hasattr(exc, 'detail') else str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         raise
     if report.closed_at:
-        return Response({"detail": "گزارش امروز قبلاً نهایی شده است.", "code": "already_finalized"}, status=status.HTTP_409_CONFLICT)
+        return Response({"detail": "گزارش این روز قبلاً نهایی شده است.", "code": "already_finalized"}, status=status.HTTP_409_CONFLICT)
     allowed = {"mobile_minutes", "self_rating", "note", "wake_time", "sleep_time"}
     data = {k: v for k, v in request.data.items() if k in allowed}
     # Use existing DailyFieldsSerializer logic
@@ -76,18 +132,25 @@ def report_finalize(request):
     student, err = _resolve_student(request)
     if err:
         return err
-    today = report_today()
+    raw = request.data.get("date")
+    if raw:
+        target, err2 = _validate_report_date(str(raw))
+        if err2:
+            return err2
+    else:
+        target = report_today()
+    assert target is not None
     # Serialize finalization with existing website and execution writes.
     StudentProfile.objects.select_for_update().get(pk=student.pk)
     try:
-        report = DailyReport.objects.select_for_update().get(student=student, date=today)
+        report = DailyReport.objects.select_for_update().get(student=student, date=target)
     except DailyReport.DoesNotExist:
         return Response({"detail": "No report.", "code": "no_report"}, status=status.HTTP_404_NOT_FOUND)
     if report.closed_at:
         # Idempotent
         return Response({"detail": "Already finalized.", "closed_at": report.closed_at.isoformat()}, status=status.HTTP_200_OK)
     # Check unresolved
-    unresolved = close_day_review(student, today)["unresolved"]
+    unresolved = close_day_review(student, target)["unresolved"]
     if unresolved:
         return Response({"detail": "Unresolved items remain.", "code": "unresolved", "unresolved": unresolved}, status=status.HTTP_409_CONFLICT)
     # Validate self_rating/note required by CloseDaySerializer? But for Telegram we allow finalize even if not yet provided? Follow domain: close requires self_rating and note
@@ -95,7 +158,7 @@ def report_finalize(request):
     # For Telegram, if not provided, use defaults? Instead call directly like the ViewSet does
     from apps.daily_reports.serializers import CloseDaySerializer
     # Request may include self_rating/note; if not, we need to require them
-    date_str = request.data.get("date") or today.isoformat()
+    date_str = str(raw) if raw else target.isoformat()
     payload = {"date": date_str}
     # If report already has self_rating/note, we can use them; else require from request
     if request.data.get("self_rating") is not None:
@@ -147,16 +210,23 @@ def report_extra_activity(request):
     student, err = _resolve_student(request)
     if err:
         return err
-    today = report_today()
+    raw = request.data.get("date")
+    if raw:
+        target, err2 = _validate_report_date(str(raw))
+        if err2:
+            return err2
+    else:
+        target = report_today()
+    assert target is not None
     try:
-        report = open_report(student.user, today)
+        report = open_report(student.user, target)
     except Exception as exc:
         from rest_framework.exceptions import ValidationError
         if isinstance(exc, ValidationError):
             return Response({"detail": exc.detail}, status=status.HTTP_400_BAD_REQUEST)
         raise
     if report.closed_at:
-        return Response({"detail": "گزارش امروز قبلاً نهایی شده است.", "code": "already_finalized"}, status=status.HTTP_409_CONFLICT)
+        return Response({"detail": "گزارش این روز قبلاً نهایی شده است.", "code": "already_finalized"}, status=status.HTTP_409_CONFLICT)
     from apps.daily_reports.serializers import UnplannedItemInputSerializer
     ser = UnplannedItemInputSerializer(data=request.data)
     ser.is_valid(raise_exception=True)

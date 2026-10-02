@@ -2,7 +2,7 @@ from django.urls import path
 from .views_execution import execution_today, execution_update
 from .views_internal import group_confirm, group_resolve, student_confirm
 from .views_plan import plan_by_date, plan_excel, plan_pdf, plan_today, plan_tomorrow, plan_week
-from .views_report import report_extra_activity, report_finalize, report_patch, report_today_view, report_yesterday
+from .views_report import report_by_date, report_extra_activity, report_finalize, report_patch, report_today_view, report_yesterday
 from .views_subjects import telegram_subjects
 from .views_progress import progress_today, progress_7days
 
@@ -23,6 +23,7 @@ urlpatterns = [
     path("internal/v1/telegram/execution/today/", execution_today, name="telegram-execution-today"),
     path("internal/v1/telegram/execution/plan-items/", execution_update, name="telegram-execution-update"),
     path("internal/v1/telegram/report/today/", report_today_view, name="telegram-report-today"),
+    path("internal/v1/telegram/report/day/", report_by_date, name="telegram-report-day"),
     path("internal/v1/telegram/report/today/patch/", report_patch, name="telegram-report-patch"),
     path("internal/v1/telegram/report/today/finalize/", report_finalize, name="telegram-report-finalize"),
     path("internal/v1/telegram/report/yesterday/", report_yesterday, name="telegram-report-yesterday"),

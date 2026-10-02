@@ -123,6 +123,7 @@ class PlanViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
             return Response({"detail": str(exc.detail) if hasattr(exc, "detail") else str(exc), "code": exc.default_code}, status=exc.status_code)
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Access-Control-Expose-Headers"] = "Content-Disposition, Content-Length"
         return response
 
     @action(detail=True, methods=("get",), url_path="export/excel")
@@ -134,6 +135,7 @@ class PlanViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Access-Control-Expose-Headers"] = "Content-Disposition, Content-Length"
         return response
 
     @action(detail=True, methods=("post",))

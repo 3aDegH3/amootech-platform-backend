@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 from django.db import transaction
 from django.utils import timezone
@@ -25,6 +25,7 @@ class ExecutionUpdateSerializer(serializers.Serializer):
     wrong_count = serializers.IntegerField(min_value=0, allow_null=True, required=False)
     unanswered_count = serializers.IntegerField(min_value=0, allow_null=True, required=False)
     note = serializers.CharField(max_length=500, allow_blank=True, required=False)
+    date = serializers.DateField(required=False)
 
 
 def _resolve_plan_item(student, plan_item_id) -> tuple[PlanItem | None, Response | None]:
@@ -38,6 +39,17 @@ def _resolve_plan_item(student, plan_item_id) -> tuple[PlanItem | None, Response
         return None, Response({"detail": "Draft plan cannot be executed.", "code": "draft"}, status=status.HTTP_409_CONFLICT)
     return item, None
 
+def _validate_execution_date(item_date: date, report_date_param: date | None = None) -> Response | None:
+    """Validate that item's plan_day date is within [today-7, today] and matches report_date if provided."""
+    today = report_today()
+    if item_date > today:
+        return Response({"detail": "آینده قابل ثبت نیست.", "code": "future_date"}, status=status.HTTP_400_BAD_REQUEST)
+    if item_date < today - timedelta(days=7):
+        return Response({"detail": "فقط ۷ روز گذشته قابل ثبت است.", "code": "out_of_range"}, status=status.HTTP_400_BAD_REQUEST)
+    if report_date_param is not None and item_date != report_date_param:
+        return Response({"detail": "تاریخ گزارش با فعالیت همخوانی ندارد.", "code": "date_mismatch"}, status=status.HTTP_400_BAD_REQUEST)
+    return None
+
 
 @api_view(["GET"])
 @authentication_classes([])
@@ -46,18 +58,28 @@ def execution_today(request):
     student, err = _resolve_student(request)
     if err:
         return err
-    today = report_today()
-    plan = Plan.objects.filter(student=student, status=Plan.Status.PUBLISHED, start_date__lte=today, end_date__gte=today).order_by("-start_date").first()
+    raw = request.query_params.get("date")
+    if raw:
+        try:
+            target = date.fromisoformat(raw)
+        except ValueError:
+            return Response({"detail": "فرمت تاریخ نامعتبر است.", "code": "invalid_date"}, status=status.HTTP_400_BAD_REQUEST)
+        err_date = _validate_execution_date(target)
+        if err_date:
+            return err_date
+    else:
+        target = report_today()
+    plan = Plan.objects.filter(student=student, status=Plan.Status.PUBLISHED, start_date__lte=target, end_date__gte=target).order_by("-start_date").first()
     if plan is None:
-        return Response({"date": today.isoformat(), "has_plan": False, "items": []})
-    day = PlanDay.objects.filter(plan=plan, date=today).first()
+        return Response({"date": target.isoformat(), "has_plan": False, "items": []})
+    day = PlanDay.objects.filter(plan=plan, date=target).first()
     if day is None:
-        return Response({"date": today.isoformat(), "has_plan": False, "items": []})
+        return Response({"date": target.isoformat(), "has_plan": False, "items": []})
     items = list(PlanItem.objects.filter(plan_day=day).select_related("subject", "chapter", "topic").order_by("ordering", "pk"))
     exec_map = {e.plan_item_id: e for e in PlanItemExecution.objects.filter(student=student, plan_item_id__in=[i.pk for i in items])}
     # Also fetch report items for actual values
     try:
-        report = DailyReport.objects.get(student=student, date=today)
+        report = DailyReport.objects.get(student=student, date=target)
         report_map = {r.plan_item_id: r for r in DailyReportItem.objects.filter(report=report, plan_item_id__in=[i.pk for i in items])}
     except DailyReport.DoesNotExist:
         report_map = {}
@@ -69,6 +91,8 @@ def execution_today(request):
             "id": it.pk,
             "kind": it.kind,
             "subject": it.subject.name if it.subject_id else None,
+            "chapter": it.chapter.name if it.chapter_id else None,
+            "topic": it.topic.name if it.topic_id else None,
             "title": it.title,
             "planned_duration_minutes": it.planned_duration_minutes,
             "planned_test_count": it.test_count,
@@ -81,7 +105,7 @@ def execution_today(request):
             "unanswered_count": row.unanswered_count if row else None,
             "note": row.note if row else "",
         })
-    return Response({"date": today.isoformat(), "has_plan": True, "items": result})
+    return Response({"date": target.isoformat(), "has_plan": True, "items": result})
 
 
 @api_view(["POST", "PATCH"])
@@ -100,13 +124,18 @@ def execution_update(request):
     if err2:
         return err2
 
-    # Telegram may send for today or for any published plan day? For Sprint 4 we only allow today's items via Telegram, but allow any date if needed — enforce today for now
-    today = report_today()
-    # Allow execution for any date? But spec says "today" execution; we allow if plan covers today but item is today
-    # For simplicity allow any item whose plan is published and student owns it; the execution domain will handle date checks
-    # Use existing execution service: transition(user, item_id, action)
-    # We need to map req_status to execution action and also set report item actuals if provided
-    # Reuse user from student
+    # Validate execution date within 7-day window
+    report_date_param = ser.validated_data.get("date")
+    err_date = _validate_execution_date(item.plan_day.date, report_date_param)
+    if err_date:
+        return err_date
+    # Check finalized report — immutable
+    try:
+        existing_report = DailyReport.objects.get(student=student, date=item.plan_day.date)
+        if existing_report.closed_at:
+            return Response({"detail": "گزارش این روز نهایی شده و قابل تغییر نیست.", "code": "already_finalized"}, status=status.HTTP_409_CONFLICT)
+    except DailyReport.DoesNotExist:
+        pass
     user = student.user
     try:
         if req_status == "COMPLETED":

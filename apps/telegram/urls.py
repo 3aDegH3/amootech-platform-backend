@@ -1,14 +1,18 @@
 from django.urls import path
 from .views_execution import execution_today, execution_update
 from .views_internal import group_confirm, group_resolve, student_confirm
-from .views_plan import plan_by_date, plan_excel, plan_pdf, plan_today, plan_tomorrow, plan_week
+from .views_plan import plan_by_date, plan_excel, plan_pdf, published_plan_pdf, plan_today, plan_tomorrow, plan_week
 from .views_report import report_by_date, report_extra_activity, report_finalize, report_patch, report_today_view, report_yesterday
 from .views_subjects import telegram_subjects
 from .views_progress import progress_today, progress_7days
 
-from .automation import morning_recipients, end_of_day_recipients
+from .automation import morning_recipients, end_of_day_recipients, report_status, pending_plan_pdfs, acknowledge_plan_pdf
 
 urlpatterns = [
+    path("internal/v1/telegram/automation/plan-pdf/pending/", pending_plan_pdfs),
+    path("internal/v1/telegram/automation/plan-pdf/ack/", acknowledge_plan_pdf),
+    path("internal/v1/telegram/plan/<int:plan_id>/pdf/", published_plan_pdf),
+    path("internal/v1/telegram/automation/report-status/", report_status),
     path("internal/v1/telegram/automation/morning-recipients/", morning_recipients),
     path("internal/v1/telegram/automation/end-of-day-recipients/", end_of_day_recipients),
     path("internal/v1/telegram/connections/group/confirm/", group_confirm, name="telegram-group-confirm"),

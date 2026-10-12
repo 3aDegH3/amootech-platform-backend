@@ -173,6 +173,12 @@ class StudentFixedCommitment(models.Model):
     start_time = models.TimeField()
     end_time = models.TimeField()
     active = models.BooleanField(default=True)
+    # Batch group for multi-day creation: items sharing the same group_id were created together
+    # and can be edited/deleted as one logical activity.
+    group_id = models.UUIDField(null=True, blank=True, db_index=True)
+    # Validity window - null means indefinite. Used by frontend to show active period.
+    valid_from = models.DateField(null=True, blank=True)
+    valid_until = models.DateField(null=True, blank=True)
 
     class Meta:
         ordering = ("weekday", "start_time", "pk")
@@ -182,6 +188,40 @@ class StudentFixedCommitment(models.Model):
             raise ValidationError({"end_time": "End time must be after start time."})
         if not self.title.strip():
             raise ValidationError({"title": "Title is required."})
+        if self.valid_from and self.valid_until and self.valid_until < self.valid_from:
+            raise ValidationError({"valid_until": "End date must be on or after start date."})
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class StudentSchoolSlot(models.Model):
+    """Optional per-period lesson name for a student's school timetable.
+
+    Each slot represents one period (zang) on a weekday. The student must have a
+    corresponding StudentFixedCommitment(kind=SCHOOL, weekday=...) for the day to be
+    considered a school day; slots without such a commitment are still stored but not
+    treated as authoritative schedule data. Period numbers start at 1.
+    """
+
+    student = models.ForeignKey("accounts.StudentProfile", on_delete=models.CASCADE, related_name="school_slots")
+    weekday = models.PositiveSmallIntegerField(choices=StudentFixedCommitment.Weekday.choices)
+    period = models.PositiveSmallIntegerField()
+    subject_name = models.CharField(max_length=120)
+
+    class Meta:
+        ordering = ("weekday", "period", "pk")
+        constraints = [
+            models.UniqueConstraint(fields=("student", "weekday", "period"), name="planning_unique_school_slot"),
+            models.CheckConstraint(condition=Q(period__gte=1) & Q(period__lte=12), name="planning_school_slot_period_range"),
+        ]
+
+    def clean(self):
+        if not self.subject_name.strip():
+            raise ValidationError({"subject_name": "Lesson name is required."})
+        if self.period < 1 or self.period > 12:
+            raise ValidationError({"period": "Period must be between 1 and 12."})
 
     def save(self, *args, **kwargs):
         self.full_clean()

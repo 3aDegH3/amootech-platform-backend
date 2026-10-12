@@ -36,6 +36,7 @@ INSTALLED_APPS = [
     "apps.daily_reports",
     "apps.core",
     "apps.telegram",
+    "apps.admin_dashboard",
 ]
 
 TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "").strip()

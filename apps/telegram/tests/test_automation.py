@@ -66,7 +66,7 @@ class AutomationTests(APITestCase):
         self.assertFalse(DailyReport.objects.exists())
         for item in (self.item1, self.item2):
             transition(self.student_user, item.pk, "mark_not_done")
-        self.assertEqual(self.listing(True), [])
+        self.assertEqual(self.listing(True), [{**self._ids(), "unresolved_count": 0}])
 
     def test_finalized_day_excluded_even_if_new_unresolved_item_exists(self):
         DailyReport.objects.create(student=self.student, date=self.today, closed_at=timezone.now())

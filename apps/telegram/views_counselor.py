@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
@@ -6,7 +7,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from apps.accounts.models import StudentProfile, User
+from apps.accounts.models import CounselorProfile, StudentProfile, User
 
 from .models import TelegramConnectionToken, TelegramGroupConnection, TelegramStudentConnection
 
@@ -89,3 +90,40 @@ def group_disconnect(request, student_id: int):
     conn.is_active = False
     conn.save(update_fields=["is_active", "updated_at"])
     return Response({"detail": "Group disconnected.", "group": {"connected": False}})
+
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def counselor_broadcast(request):
+    user = request.user
+    if user.role not in (User.Role.COUNSELOR, User.Role.ADMIN):
+        return Response({"detail": "دسترسی ارسال پیام ندارید."}, status=403)
+    groups = TelegramGroupConnection.objects.filter(is_active=True)
+    if user.role == User.Role.COUNSELOR:
+        counselor = get_object_or_404(CounselorProfile, user=user)
+        groups = groups.filter(student__counselor=counselor)
+    chat_ids = list(groups.order_by("telegram_chat_id").values_list("telegram_chat_id", flat=True).distinct())
+    if request.method == "GET":
+        return Response({"total": len(chat_ids)})
+    message = request.data.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return Response({"detail": "پیام را وارد کنید."}, status=400)
+    message = message.strip()
+    if len(message) > 4000:
+        return Response({"detail": "پیام بیش از حد طولانی است."}, status=400)
+    if not chat_ids:
+        return Response({"detail": "گروه متصلی یافت نشد."}, status=404)
+    from .bot_control import BotControlError, BotControlUnavailable, bot_broadcast_sync
+    results, sent, failed = [], 0, 0
+    # The bot accepts bounded batches; never silently discard students after 200.
+    for offset in range(0, len(chat_ids), 200):
+        batch = chat_ids[offset:offset + 200]
+        try:
+            result = bot_broadcast_sync(batch, message)
+            sent += result.get("sent", 0)
+            failed += result.get("failed", 0)
+            results.extend(result.get("results", []))
+        except (BotControlError, BotControlUnavailable):
+            failed += len(batch)
+            results.extend({"telegram_chat_id": chat, "status": "failed", "error": "bot_unavailable"} for chat in batch)
+    return Response({"sent": sent, "failed": failed, "total": len(chat_ids), "results": results})

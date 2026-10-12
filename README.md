@@ -28,6 +28,10 @@ docker compose up -d --build
 - OpenAPI schema: http://localhost:8000/api/v1/schema/
 - Swagger UI: http://localhost:8000/api/v1/docs/
 
+Backend builds use the host network by default so package downloads use the
+host's DNS on Linux. Set `DOCKER_BUILD_NETWORK=default` in `.env` if your Docker
+installation requires the default build network (for example, Docker Desktop).
+
 The browser-facing `NEXT_PUBLIC_API_BASE_URL` defaults to
 `http://localhost:8000/api/v1`. The database hostname inside Compose is `db`.
 PostgreSQL is intentionally not published to the host.

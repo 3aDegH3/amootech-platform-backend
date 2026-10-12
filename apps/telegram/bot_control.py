@@ -84,11 +84,11 @@ def bot_get_sync(path: str, params: dict | None = None) -> dict:
         return resp.json() if resp.content else {}
 
 
-def bot_post_sync(path: str, json: dict | None = None) -> dict:
+def bot_post_sync(path: str, json: dict | None = None, *, timeout: float = 10.0) -> dict:
     base = _base_url()
     if not base:
         raise BotControlUnavailable("bot control not configured")
-    with httpx.Client(timeout=10.0) as client:
+    with httpx.Client(timeout=timeout) as client:
         try:
             resp = client.post(f"{base}{path}", json=json, headers=_headers())
         except httpx.RequestError as exc:
@@ -121,3 +121,7 @@ def bot_reachable_sync() -> bool:
         return True
     except Exception:
         return False
+
+
+def bot_broadcast_sync(telegram_chat_ids: list[int], message: str) -> dict:
+    return bot_post_sync("/internal/v1/groups/broadcast", json={"telegram_chat_ids": telegram_chat_ids, "message": message}, timeout=450.0)

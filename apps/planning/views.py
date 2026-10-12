@@ -13,14 +13,14 @@ from rest_framework.response import Response
 from apps.accounts.models import User
 from apps.accounts.permissions import IsStudent
 from .execution import transition
-from .models import Plan, PlanDay, PlanItem, PlanItemExecution, StudentFixedCommitment
+from .models import Plan, PlanDay, PlanItem, PlanItemExecution, StudentFixedCommitment, StudentSchoolSlot
 from .export_service import export_plan_excel, export_plan_pdf
 from .excel_to_pdf import convert_excel_to_pdf
 from .export_exceptions import ExportConversionFailed
 from .serializers import (
-    FinishExecutionSerializer, PlanDayDetailSerializer, PlanDaySerializer, PlanDetailSerializer,
-    PlanItemExecutionSerializer, PlanItemSerializer,
-    PlanSerializer, StudentFixedCommitmentSerializer, manageable_plan,
+    BatchCommitmentSerializer, BulkSchoolSlotsSerializer, FinishExecutionSerializer, PlanDayDetailSerializer,
+    PlanDaySerializer, PlanDetailSerializer, PlanItemExecutionSerializer, PlanItemSerializer, PlanSerializer,
+    SchoolHoursSerializer, StudentFixedCommitmentSerializer, StudentSchoolSlotSerializer, manageable_plan, manageable_student,
 )
 
 
@@ -31,9 +31,14 @@ class PlanningAccess(BasePermission):
         if request.user.role == User.Role.ADMIN:
             return True
         if request.user.role == User.Role.COUNSELOR:
-            return request.method in ("GET", "HEAD", "OPTIONS") if view.basename == "commitments" else True
+            if view.basename in ("commitments", "school-slots"):
+                return True
+            return True
         if request.user.role == User.Role.STUDENT:
-            return request.method in ("GET", "HEAD", "OPTIONS") if view.basename != "commitments" else True
+            # Student: can read plans/days/items and manage own commitments
+            if view.basename in ("commitments", "school-slots"):
+                return True
+            return request.method in ("GET", "HEAD", "OPTIONS")
         return False
 
 
@@ -84,6 +89,38 @@ class PlanViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
         student = self.request.query_params.get("student")
         if student and student.isdecimal():
             queryset = queryset.filter(student_id=int(student))
+        # Admin filters
+        if self.request.user.role == User.Role.ADMIN:
+            counselor = self.request.query_params.get("counselor")
+            if counselor and counselor.isdigit():
+                queryset = queryset.filter(counselor_id=int(counselor))
+            plan_status = self.request.query_params.get("status")
+            if plan_status in (Plan.Status.DRAFT, Plan.Status.PUBLISHED):
+                queryset = queryset.filter(status=plan_status)
+            q = self.request.query_params.get("q", "").strip()
+            if q:
+                queryset = queryset.filter(
+                    models.Q(title__icontains=q)
+                    | models.Q(student__user__username__icontains=q)
+                    | models.Q(student__user__first_name__icontains=q)
+                    | models.Q(student__user__last_name__icontains=q)
+                )
+            date_from = self.request.query_params.get("date_from")
+            date_to = self.request.query_params.get("date_to")
+            if date_from:
+                try:
+                    from datetime import date as _d
+                    _d.fromisoformat(date_from)
+                    queryset = queryset.filter(start_date__gte=date_from)
+                except ValueError:
+                    pass
+            if date_to:
+                try:
+                    from datetime import date as _d
+                    _d.fromisoformat(date_to)
+                    queryset = queryset.filter(end_date__lte=date_to)
+                except ValueError:
+                    pass
         if self.action in ("retrieve", "export_pdf", "export_excel"):
             items = PlanItem.objects.select_related("subject", "chapter", "topic", "execution").prefetch_related("report_items")
             days = PlanDay.objects.prefetch_related(Prefetch("items", queryset=items))
@@ -158,6 +195,8 @@ class PlanViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
         plan.status = Plan.Status.PUBLISHED
         plan.published_at = timezone.now()
         plan.save()
+        from apps.telegram.automation import publish_pdf_after_commit
+        publish_pdf_after_commit(plan)
         return Response(PlanSerializer(plan, context=self.get_serializer_context()).data)
 
     @action(detail=True, methods=("post",))
@@ -554,4 +593,222 @@ class StudentFixedCommitmentViewSet(viewsets.ModelViewSet):
         student = self.request.query_params.get("student")
         if student and student.isdecimal():
             scoped = scoped.filter(student_id=int(student))
+        kind = self.request.query_params.get("kind")
+        if kind:
+            scoped = scoped.filter(kind=kind)
+        active = self.request.query_params.get("active")
+        if active in ("true", "false"):
+            scoped = scoped.filter(active=(active == "true"))
+        group = self.request.query_params.get("group_id")
+        if group:
+            scoped = scoped.filter(group_id=group)
         return scoped
+
+    def perform_create(self, serializer):
+        student = serializer.validated_data.get("student")
+        # For student users, manageable_student returns False (only admin/counselor). Skip check for STUDENT.
+        if student and self.request.user.role not in ("STUDENT",) and not manageable_student(student, self.request.user) and self.request.user.role != User.Role.ADMIN:
+            raise serializers.ValidationError({"student": "This student is not assigned to you."})
+        serializer.save()
+
+    def perform_update(self, serializer):
+        student = serializer.validated_data.get("student", serializer.instance.student)
+        if self.request.user.role not in ("STUDENT",) and not manageable_student(student, self.request.user) and self.request.user.role != User.Role.ADMIN:
+            raise serializers.ValidationError({"student": "This student is not assigned to you."})
+        serializer.save()
+
+    @action(detail=False, methods=("post",), url_path="batch")
+    @transaction.atomic
+    def batch(self, request):
+        serializer = BatchCommitmentSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        student = data["student"]
+        weekdays = data["weekdays"]
+        import uuid
+        group_id = uuid.uuid4()
+        created = []
+        for wd in weekdays:
+            obj = StudentFixedCommitment(
+                student=student, kind=data["kind"], title=data["title"].strip(),
+                weekday=wd, start_time=data["start_time"], end_time=data["end_time"],
+                active=True, group_id=group_id, valid_from=data.get("valid_from"), valid_until=data.get("valid_until"),
+            )
+            obj.full_clean()
+            obj.save()
+            created.append(obj)
+        return Response(StudentFixedCommitmentSerializer(created, many=True).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=("post",), url_path="school-hours")
+    @transaction.atomic
+    def school_hours(self, request):
+        serializer = SchoolHoursSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        student = data["student"]
+        # Atomic replace of SCHOOL commitments for given weekdays
+        import uuid
+        group_id = uuid.uuid4()
+        # Delete existing SCHOOL commitments for those weekdays (preserve history: we delete and recreate)
+        StudentFixedCommitment.objects.filter(student=student, kind=StudentFixedCommitment.Kind.SCHOOL, weekday__in=data["weekdays"]).delete()
+        created = []
+        for wd in data["weekdays"]:
+            obj = StudentFixedCommitment(
+                student=student, kind=StudentFixedCommitment.Kind.SCHOOL, title=data.get("title") or "مدرسه",
+                weekday=wd, start_time=data["start_time"], end_time=data["end_time"],
+                active=True, group_id=group_id, valid_from=data.get("valid_from"), valid_until=data.get("valid_until"),
+            )
+            obj.full_clean()
+            obj.save()
+            created.append(obj)
+        return Response(StudentFixedCommitmentSerializer(created, many=True).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=("post",), url_path="toggle-active")
+    def toggle_active(self, request, pk=None):
+        obj = self.get_object()
+        if not manageable_student(obj.student, request.user) and request.user.role != User.Role.ADMIN:
+            return Response({"detail": "This commitment is not available to you."}, status=status.HTTP_403_FORBIDDEN)
+        obj.active = not obj.active
+        obj.save(update_fields=["active"])
+        return Response(StudentFixedCommitmentSerializer(obj).data)
+
+    @action(detail=False, methods=("post",), url_path="group-update")
+    @transaction.atomic
+    def group_update(self, request):
+        group_id = request.data.get("group_id")
+        if not group_id:
+            raise serializers.ValidationError({"group_id": "This field is required."})
+        items = list(StudentFixedCommitment.objects.filter(group_id=group_id).select_related("student"))
+        if not items:
+            return Response({"detail": "Group not found."}, status=status.HTTP_404_NOT_FOUND)
+        # Ownership check via first item
+        if not manageable_student(items[0].student, request.user) and request.user.role != User.Role.ADMIN:
+            return Response({"detail": "This group is not available to you."}, status=status.HTTP_403_FORBIDDEN)
+        # Validate via BatchCommitmentSerializer-like rules
+        title = request.data.get("title")
+        kind = request.data.get("kind")
+        start_time = request.data.get("start_time")
+        end_time = request.data.get("end_time")
+        valid_from = request.data.get("valid_from")
+        valid_until = request.data.get("valid_until")
+        active = request.data.get("active")
+        # Build update dict
+        from django.utils.dateparse import parse_time, parse_date
+        updates = {}
+        if title is not None:
+            if not str(title).strip():
+                raise serializers.ValidationError({"title": "Title is required."})
+            updates["title"] = str(title).strip()
+        if kind is not None:
+            if kind not in [c[0] for c in StudentFixedCommitment.Kind.choices]:
+                raise serializers.ValidationError({"kind": "Invalid kind."})
+            updates["kind"] = kind
+        if start_time is not None:
+            pt = parse_time(str(start_time))
+            if not pt:
+                raise serializers.ValidationError({"start_time": "Invalid time."})
+            updates["start_time"] = pt
+        if end_time is not None:
+            pt = parse_time(str(end_time))
+            if not pt:
+                raise serializers.ValidationError({"end_time": "Invalid time."})
+            updates["end_time"] = pt
+        if "start_time" in updates or "end_time" in updates:
+            s = updates.get("start_time", items[0].start_time)
+            e = updates.get("end_time", items[0].end_time)
+            if e <= s:
+                raise serializers.ValidationError({"end_time": "End time must be after start time."})
+        if valid_from is not None:
+            updates["valid_from"] = parse_date(str(valid_from)) if valid_from else None
+        if valid_until is not None:
+            updates["valid_until"] = parse_date(str(valid_until)) if valid_until else None
+        if "valid_from" in updates or "valid_until" in updates:
+            vf = updates.get("valid_from", items[0].valid_from)
+            vu = updates.get("valid_until", items[0].valid_until)
+            if vf and vu and vu < vf:
+                raise serializers.ValidationError({"valid_until": "End date must be on or after start date."})
+        if active is not None:
+            updates["active"] = bool(active)
+        for obj in items:
+            for k, v in updates.items():
+                setattr(obj, k, v)
+            obj.full_clean()
+            obj.save()
+        return Response(StudentFixedCommitmentSerializer(items, many=True).data)
+
+    @action(detail=False, methods=("post",), url_path="group-delete")
+    @transaction.atomic
+    def group_delete(self, request):
+        group_id = request.data.get("group_id")
+        if not group_id:
+            raise serializers.ValidationError({"group_id": "This field is required."})
+        items = list(StudentFixedCommitment.objects.filter(group_id=group_id).select_related("student"))
+        if not items:
+            return Response({"detail": "Group not found."}, status=status.HTTP_404_NOT_FOUND)
+        if not manageable_student(items[0].student, request.user) and request.user.role != User.Role.ADMIN:
+            return Response({"detail": "This group is not available to you."}, status=status.HTTP_403_FORBIDDEN)
+        StudentFixedCommitment.objects.filter(group_id=group_id).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class StudentSchoolSlotViewSet(viewsets.ModelViewSet):
+    permission_classes = (PlanningAccess,)
+    serializer_class = StudentSchoolSlotSerializer
+    queryset = StudentSchoolSlot.objects.all()
+
+    def get_queryset(self):
+        queryset = StudentSchoolSlot.objects.select_related("student__user", "student__counselor__user")
+        user = self.request.user
+        if user.role == User.Role.ADMIN:
+            scoped = queryset
+        elif user.role == User.Role.COUNSELOR:
+            scoped = queryset.filter(student__counselor__user=user)
+        else:
+            scoped = queryset.filter(student__user=user)
+        student = self.request.query_params.get("student")
+        if student and student.isdecimal():
+            scoped = scoped.filter(student_id=int(student))
+        weekday = self.request.query_params.get("weekday")
+        if weekday is not None and weekday.isdigit():
+            scoped = scoped.filter(weekday=int(weekday))
+        return scoped
+
+    @action(detail=False, methods=("post",), url_path="bulk")
+    @transaction.atomic
+    def bulk(self, request):
+        serializer = BulkSchoolSlotsSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        student = serializer.validated_data["student"]
+        slots = serializer.validated_data["slots"]
+        # Replace all slots for this student atomically (optional: or merge; we replace for simplicity but preserve untouched weekdays if not mentioned?)
+        # To keep partial edits safe, we delete existing slots that match (weekday,period) in payload and recreate them.
+        # Then return current state.
+        for entry in slots:
+            wd = int(entry["weekday"])
+            period = int(entry["period"])
+            name = str(entry["subject_name"]).strip()
+            StudentSchoolSlot.objects.update_or_create(
+                student=student, weekday=wd, period=period,
+                defaults={"subject_name": name},
+            )
+        return Response(StudentSchoolSlotSerializer(self.get_queryset().filter(student=student), many=True).data)
+
+    @action(detail=False, methods=("delete",), url_path="clear")
+    @transaction.atomic
+    def clear(self, request):
+        student_id = request.query_params.get("student") or request.data.get("student")
+        if not student_id:
+            raise serializers.ValidationError({"student": "This field is required."})
+        try:
+            from apps.accounts.models import StudentProfile
+            student = StudentProfile.objects.get(pk=int(student_id))
+        except Exception:
+            raise serializers.ValidationError({"student": "Student not found."})
+        if not manageable_student(student, request.user) and request.user.role != User.Role.ADMIN:
+            return Response({"detail": "This student is not available to you."}, status=status.HTTP_403_FORBIDDEN)
+        weekday = request.query_params.get("weekday") or request.data.get("weekday")
+        qs = StudentSchoolSlot.objects.filter(student=student)
+        if weekday is not None and str(weekday).isdigit():
+            qs = qs.filter(weekday=int(weekday))
+        qs.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

@@ -21,6 +21,7 @@ urlpatterns = [
     path("api/", include("apps.telegram.urls")),
     path("api/v1/", include("apps.telegram.urls_counselor")),
     path("api/v1/", include("apps.telegram.urls_admin")),
+    path("api/v1/", include("apps.admin_dashboard.urls")),
     path("api/v1/schema/", SpectacularAPIView.as_view(), name="schema"),
     path(
         "api/v1/docs/",

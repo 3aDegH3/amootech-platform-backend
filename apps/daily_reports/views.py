@@ -26,6 +26,12 @@ class StudentProgressView(APIView):
     permission_classes = (IsAuthenticated,)
 
     def get(self, request):
+        if request.user.role == User.Role.ADMIN:
+            sid = request.query_params.get("student")
+            if sid and sid.isdigit():
+                student = get_object_or_404(StudentProfile, pk=int(sid))
+                return Response(student_progress(student))
+            raise serializers.ValidationError({"student": "شناسه دانش‌آموز لازم است."})
         if request.user.role != User.Role.STUDENT:
             raise PermissionDenied("Only students can view their progress.")
         return Response(student_progress(request.user.student_profile))
@@ -35,9 +41,12 @@ class CounselorStudentProgressView(APIView):
     permission_classes = (IsAuthenticated,)
 
     def get(self, request, student_id):
-        if request.user.role != User.Role.COUNSELOR:
+        if request.user.role == User.Role.ADMIN:
+            student = get_object_or_404(StudentProfile, pk=student_id)
+        elif request.user.role == User.Role.COUNSELOR:
+            student = get_object_or_404(StudentProfile, pk=student_id, counselor__user=request.user)
+        else:
             raise PermissionDenied("Only counselors can view assigned student progress.")
-        student = get_object_or_404(StudentProfile, pk=student_id, counselor__user=request.user)
         start_raw, end_raw = request.query_params.get("start_date"), request.query_params.get("end_date")
         if bool(start_raw) != bool(end_raw):
             raise serializers.ValidationError({"date": "تاریخ شروع و پایان را با هم وارد کنید."})
@@ -56,9 +65,12 @@ class CounselorStudentReportsView(APIView):
     permission_classes = (IsAuthenticated,)
 
     def get(self, request, student_id):
-        if request.user.role != User.Role.COUNSELOR:
+        if request.user.role == User.Role.ADMIN:
+            student = get_object_or_404(StudentProfile, pk=student_id)
+        elif request.user.role == User.Role.COUNSELOR:
+            student = get_object_or_404(StudentProfile, pk=student_id, counselor__user=request.user)
+        else:
             raise PermissionDenied("Only counselors can view assigned student reports.")
-        student = get_object_or_404(StudentProfile, pk=student_id, counselor__user=request.user)
         params = request.query_params
         start_raw, end_raw = params.get("start_date"), params.get("end_date")
         if not start_raw or not end_raw:
@@ -119,17 +131,36 @@ class DailyReportViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
             if "date" in self.request.query_params:
                 date = serializers.DateField().run_validation(self.request.query_params["date"])
                 queryset = queryset.filter(date=date)
+            # Admin additional filters
+            if user.role == User.Role.ADMIN:
+                counselor = self.request.query_params.get("counselor")
+                if counselor and counselor.isdigit():
+                    queryset = queryset.filter(student__counselor_id=int(counselor))
+                date_from = self.request.query_params.get("date_from")
+                date_to = self.request.query_params.get("date_to")
+                if date_from:
+                    try:
+                        queryset = queryset.filter(date__gte=serializers.DateField().run_validation(date_from))
+                    except Exception:
+                        pass
+                if date_to:
+                    try:
+                        queryset = queryset.filter(date__lte=serializers.DateField().run_validation(date_to))
+                    except Exception:
+                        pass
         return queryset
 
     def list(self, request, *args, **kwargs):
         reports = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(reports)
         rows = page if page is not None else reports
-        payload = [{"id": report.pk, "student": report.student_id, "date": report.date.isoformat(), "self_rating": report.self_rating} for report in rows]
+        payload = [{"id": report.pk, "student": report.student_id, "student_username": report.student.user.username if hasattr(report.student, "user") else None, "counselor_id": report.student.counselor_id if hasattr(report.student, "counselor_id") else None, "date": report.date.isoformat(), "self_rating": report.self_rating, "closed_at": report.closed_at.isoformat() if report.closed_at else None} for report in rows]
         return self.get_paginated_response(payload) if page is not None else Response(payload)
 
     def retrieve(self, request, *args, **kwargs):
-        return Response(report_payload(self.get_object()))
+        obj = self.get_object()
+        # Allow admin/counselor to view any report; student already scoped
+        return Response(report_payload(obj))
 
     def update(self, request, *args, **kwargs):
         return self.partial_update(request, *args, **kwargs)

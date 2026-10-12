@@ -16,7 +16,9 @@ services:
     restart: unless-stopped
 
   backend:
-    build: .
+    build:
+      context: .
+      network: ${DOCKER_BUILD_NETWORK:-host}
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     env_file: .env
     volumes:

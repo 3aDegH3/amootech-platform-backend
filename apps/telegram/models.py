@@ -169,3 +169,12 @@ class TelegramConnectionToken(models.Model):
         if not self.token_hash:
             raise ValidationError({"token_hash": "token_hash is required."})
         return super().save(*args, **kwargs)
+
+
+class TelegramPlanDelivery(models.Model):
+    """Durable publication outbox; only new publications create these rows."""
+    plan = models.OneToOneField("planning.Plan", on_delete=models.CASCADE, related_name="telegram_pdf_delivery")
+    telegram_chat_id = models.BigIntegerField()
+    status = models.CharField(max_length=16, default="PENDING", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)

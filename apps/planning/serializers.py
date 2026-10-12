@@ -3,7 +3,7 @@ from rest_framework import serializers
 from django.utils import timezone
 
 from apps.accounts.models import CounselorProfile, StudentProfile, User
-from .models import Plan, PlanDay, PlanItem, PlanItemExecution, StudentFixedCommitment
+from .models import Plan, PlanDay, PlanItem, PlanItemExecution, StudentFixedCommitment, StudentSchoolSlot
 
 
 def validate_model(serializer, attrs):
@@ -23,6 +23,19 @@ def manageable_plan(plan, user):
         and plan.counselor.user_id == user.pk
         and plan.student.counselor_id == plan.counselor_id
     )
+
+
+def manageable_student(student, user):
+    """Return True if user may manage fixed commitments for that student."""
+    if user.role == User.Role.ADMIN:
+        return True
+    if user.role == User.Role.COUNSELOR:
+        try:
+            counselor_id = user.counselor_profile.pk  # type: ignore[attr-defined]
+        except Exception:
+            return False
+        return student.counselor_id == counselor_id
+    return False
 
 
 def item_has_student_data(item):
@@ -166,18 +179,166 @@ class PlanDetailSerializer(PlanSerializer):
 
 class StudentFixedCommitmentSerializer(serializers.ModelSerializer):
     student = serializers.PrimaryKeyRelatedField(queryset=StudentProfile.objects.all(), required=False)
+
     class Meta:
         model = StudentFixedCommitment
-        fields = ("id", "student", "kind", "title", "weekday", "start_time", "end_time", "active")
+        fields = ("id", "student", "kind", "title", "weekday", "start_time", "end_time", "active", "group_id", "valid_from", "valid_until")
+        read_only_fields = ("group_id",)
 
     def validate(self, attrs):
         user = self.context["request"].user
+        student = attrs.get("student", self.instance.student if self.instance else None)
+        # Resolve student when only provided via initial_data for create
+        if not student and "student" in self.initial_data:
+            try:
+                student = StudentProfile.objects.get(pk=self.initial_data["student"])
+                attrs["student"] = student
+            except Exception:
+                pass
         if user.role == User.Role.COUNSELOR:
-            raise serializers.ValidationError("Counselors can only view fixed commitments.")
-        if user.role == User.Role.STUDENT:
-            if "student" in self.initial_data:
-                raise serializers.ValidationError({"student": "Student is set from your account."})
-            attrs["student"] = user.student_profile
+            # Counselor may create/edit/delete fixed commitments for own students
+            if student and not manageable_student(student, user):
+                raise serializers.ValidationError({"student": "This student is not assigned to you."})
+            if not student and not self.instance:
+                raise serializers.ValidationError({"student": "This field is required."})
+            if "student" not in attrs and self.instance:
+                # On update, ensure still manageable
+                if not manageable_student(self.instance.student, user):
+                    raise serializers.ValidationError("This commitment is not available to you.")
+        elif user.role == User.Role.STUDENT:
+            if self.instance:
+                raise serializers.ValidationError("Students cannot modify fixed commitments.")
+            # If student sent explicit student id, validate it matches own
+            explicit = self.initial_data.get("student")
+            if explicit is not None and str(explicit) != str(user.student_profile.pk):
+                raise serializers.ValidationError({"student": "Student must be your own profile."})
+            if "student" not in attrs:
+                attrs["student"] = user.student_profile
+            else:
+                # Ensure attrs student is own
+                if attrs["student"].pk != user.student_profile.pk:
+                    raise serializers.ValidationError({"student": "Student must be your own profile."})
+            return validate_model(self, attrs)
+        # Admin: allow but still validate student presence
         if "student" not in attrs and not self.instance:
             raise serializers.ValidationError({"student": "This field is required."})
         return validate_model(self, attrs)
+
+
+class StudentSchoolSlotSerializer(serializers.ModelSerializer):
+    student = serializers.PrimaryKeyRelatedField(queryset=StudentProfile.objects.all(), required=False)
+
+    class Meta:
+        model = StudentSchoolSlot
+        fields = ("id", "student", "weekday", "period", "subject_name")
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+        student = attrs.get("student", self.instance.student if self.instance else None)
+        if not student and "student" in self.initial_data:
+            try:
+                student = StudentProfile.objects.get(pk=self.initial_data["student"])
+                attrs["student"] = student
+            except Exception:
+                pass
+        if user.role == User.Role.COUNSELOR:
+            if student and not manageable_student(student, user):
+                raise serializers.ValidationError({"student": "This student is not assigned to you."})
+            if not student and not self.instance:
+                raise serializers.ValidationError({"student": "This field is required."})
+            if "student" not in attrs and self.instance and not manageable_student(self.instance.student, user):
+                raise serializers.ValidationError("This school slot is not available to you.")
+        elif user.role == User.Role.STUDENT:
+            raise serializers.ValidationError("Students cannot modify school timetable.")
+        if "student" not in attrs and not self.instance:
+            raise serializers.ValidationError({"student": "This field is required."})
+        return validate_model(self, attrs)
+
+
+# Batch helpers (used by viewset actions)
+class BatchCommitmentSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=200)
+    kind = serializers.ChoiceField(choices=[c[0] for c in StudentFixedCommitment.Kind.choices])
+    weekdays = serializers.ListField(child=serializers.IntegerField(min_value=0, max_value=6), allow_empty=False)
+    start_time = serializers.TimeField()
+    end_time = serializers.TimeField()
+    student = serializers.PrimaryKeyRelatedField(queryset=StudentProfile.objects.all())
+    valid_from = serializers.DateField(required=False, allow_null=True, default=None)
+    valid_until = serializers.DateField(required=False, allow_null=True, default=None)
+
+    def validate(self, attrs):
+        if attrs["end_time"] <= attrs["start_time"]:
+            raise serializers.ValidationError({"end_time": "End time must be after start time."})
+        if attrs.get("valid_from") and attrs.get("valid_until") and attrs["valid_until"] < attrs["valid_from"]:
+            raise serializers.ValidationError({"valid_until": "End date must be on or after start date."})
+        if len(attrs["weekdays"]) != len(set(attrs["weekdays"])):
+            raise serializers.ValidationError({"weekdays": "Duplicate weekdays are not allowed."})
+        if not attrs["title"].strip():
+            raise serializers.ValidationError({"title": "Title is required."})
+        user = self.context["request"].user
+        if user.role == User.Role.COUNSELOR and not manageable_student(attrs["student"], user):
+            raise serializers.ValidationError({"student": "This student is not assigned to you."})
+        if user.role == User.Role.STUDENT:
+            raise serializers.ValidationError("Students cannot modify fixed commitments.")
+        return attrs
+
+
+class SchoolHoursSerializer(serializers.Serializer):
+    student = serializers.PrimaryKeyRelatedField(queryset=StudentProfile.objects.all())
+    weekdays = serializers.ListField(child=serializers.IntegerField(min_value=0, max_value=6), allow_empty=False)
+    start_time = serializers.TimeField()
+    end_time = serializers.TimeField()
+    title = serializers.CharField(max_length=200, required=False, default="مدرسه")
+    valid_from = serializers.DateField(required=False, allow_null=True, default=None)
+    valid_until = serializers.DateField(required=False, allow_null=True, default=None)
+
+    def validate(self, attrs):
+        if attrs["end_time"] <= attrs["start_time"]:
+            raise serializers.ValidationError({"end_time": "End time must be after start time."})
+        if attrs.get("valid_from") and attrs.get("valid_until") and attrs["valid_until"] < attrs["valid_from"]:
+            raise serializers.ValidationError({"valid_until": "End date must be on or after start date."})
+        if len(attrs["weekdays"]) != len(set(attrs["weekdays"])):
+            raise serializers.ValidationError({"weekdays": "Duplicate weekdays are not allowed."})
+        user = self.context["request"].user
+        if user.role == User.Role.COUNSELOR and not manageable_student(attrs["student"], user):
+            raise serializers.ValidationError({"student": "This student is not assigned to you."})
+        if user.role == User.Role.STUDENT:
+            raise serializers.ValidationError("Students cannot modify school timetable.")
+        return attrs
+
+
+class BulkSchoolSlotsSerializer(serializers.Serializer):
+    student = serializers.PrimaryKeyRelatedField(queryset=StudentProfile.objects.all())
+    slots = serializers.ListField(
+        child=serializers.DictField(),
+        allow_empty=False,
+    )
+
+    def validate_slots(self, value):
+        seen = set()
+        for entry in value:
+            try:
+                wd = int(entry.get("weekday"))
+                period = int(entry.get("period"))
+                name = str(entry.get("subject_name", "")).strip()
+            except Exception:
+                raise serializers.ValidationError("Each slot needs weekday, period, subject_name.")
+            if wd < 0 or wd > 6:
+                raise serializers.ValidationError("Weekday must be 0-6.")
+            if period < 1 or period > 12:
+                raise serializers.ValidationError("Period must be 1-12.")
+            if not name:
+                raise serializers.ValidationError("Lesson name is required.")
+            key = (wd, period)
+            if key in seen:
+                raise serializers.ValidationError(f"Duplicate slot for weekday {wd} period {period}.")
+            seen.add(key)
+        return value
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+        if user.role == User.Role.COUNSELOR and not manageable_student(attrs["student"], user):
+            raise serializers.ValidationError({"student": "This student is not assigned to you."})
+        if user.role == User.Role.STUDENT:
+            raise serializers.ValidationError("Students cannot modify school timetable.")
+        return attrs

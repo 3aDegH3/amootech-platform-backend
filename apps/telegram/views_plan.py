@@ -274,3 +274,20 @@ def plan_excel(request):
     resp = HttpResponse(data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     resp["Content-Disposition"] = f'attachment; filename="plan-{plan.pk}.xlsx"'
     return resp
+
+
+@api_view(["GET"])
+@authentication_classes([])
+@permission_classes([ServiceTokenPermission])
+def published_plan_pdf(request, plan_id):
+    # Service-only group identity; personal Telegram binding is not required to
+    # deliver a counselor's publication to the student's connected group.
+    try:
+        chat_id = int(request.query_params.get("telegram_chat_id", ""))
+    except (TypeError, ValueError):
+        return Response({"code": "invalid_identity"}, status=400)
+    from django.shortcuts import get_object_or_404
+    plan = get_object_or_404(Plan.objects.filter(status=Plan.Status.PUBLISHED, student__user__is_active=True, student__telegram_group_connections__telegram_chat_id=chat_id, student__telegram_group_connections__is_active=True), pk=plan_id)
+    response = HttpResponse(export_plan_pdf(plan), content_type="application/pdf")
+    response["Content-Disposition"] = f'attachment; filename="plan-{plan.pk}.pdf"'
+    return response

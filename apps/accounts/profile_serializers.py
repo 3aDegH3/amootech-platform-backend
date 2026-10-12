@@ -7,7 +7,7 @@ from apps.academics.models import Grade, Field
 class ProfileUserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ("id", "username", "email", "first_name", "last_name", "is_active")
+        fields = ("id", "username", "email", "first_name", "last_name", "is_active", "date_joined", "last_login")
 
 
 class ProfileSerializer(serializers.ModelSerializer):
@@ -45,9 +45,13 @@ class ProfileSerializer(serializers.ModelSerializer):
 
 
 class CounselorSerializer(ProfileSerializer):
+    students_count = serializers.IntegerField(read_only=True)
+    active_students_count = serializers.IntegerField(read_only=True)
+    plans_count = serializers.IntegerField(read_only=True)
+
     class Meta:
         model = CounselorProfile
-        fields = ("id", "user", "username", "password", "email", "first_name", "last_name", "is_active")
+        fields = ("id", "user", "username", "password", "email", "first_name", "last_name", "is_active", "students_count", "active_students_count", "plans_count")
 
     @transaction.atomic
     def create(self, validated_data):
@@ -63,10 +67,42 @@ class StudentSerializer(ProfileSerializer):
     counselor_user = ProfileUserSerializer(source="counselor.user", read_only=True)
     grade_name = serializers.CharField(source="grade.name", read_only=True)
     field_name = serializers.CharField(source="field.name", read_only=True)
+    current_plan = serializers.SerializerMethodField()
+    telegram_status = serializers.SerializerMethodField()
+    reports_today = serializers.SerializerMethodField()
 
     class Meta:
         model = StudentProfile
-        fields = ("id", "user", "username", "password", "email", "first_name", "last_name", "is_active", "counselor", "counselor_user", "grade", "grade_name", "field", "field_name", "school_name")
+        fields = ("id", "user", "username", "password", "email", "first_name", "last_name", "is_active", "counselor", "counselor_user", "grade", "grade_name", "field", "field_name", "school_name", "current_plan", "telegram_status", "reports_today")
+
+    def get_current_plan(self, obj):
+        # Annotated or fallback: look for current published plan
+        if hasattr(obj, "_current_plan_cache"):
+            cp = obj._current_plan_cache
+            if cp:
+                return {"id": cp.id, "title": cp.title, "status": cp.status, "start_date": cp.start_date.isoformat(), "end_date": cp.end_date.isoformat()}
+            return None
+        # Fallback without annotation (single object)
+        from apps.planning.models import Plan
+        from django.utils import timezone
+        today = timezone.localdate()
+        cp = Plan.objects.filter(student=obj, status=Plan.Status.PUBLISHED, start_date__lte=today, end_date__gte=today).order_by("-start_date").first()
+        if cp:
+            return {"id": cp.id, "title": cp.title, "status": cp.status, "start_date": cp.start_date.isoformat(), "end_date": cp.end_date.isoformat()}
+        latest = Plan.objects.filter(student=obj).order_by("-created_at").first()
+        if latest:
+            return {"id": latest.id, "title": latest.title, "status": latest.status, "start_date": latest.start_date.isoformat(), "end_date": latest.end_date.isoformat()}
+        return None
+
+    def get_telegram_status(self, obj):
+        if hasattr(obj, "_telegram_cache"):
+            return obj._telegram_cache
+        return None
+
+    def get_reports_today(self, obj):
+        if hasattr(obj, "_reports_today_cache"):
+            return obj._reports_today_cache
+        return None
 
     def validate(self, attrs):
         attrs = super().validate(attrs)

@@ -176,9 +176,11 @@ class PlanningTests(APITestCase):
         commitment_id = response.data["id"]
         self.assertEqual(response.data["student"], self.student.pk)
         self.assertEqual(self.client.post(path, {"student": self.other_student.pk, "kind": "SPORTS", "title": "Other", "weekday": 0, "start_time": "15:30", "end_time": "17:30"}).status_code, 400)
+        # Student cannot patch own commitment (read-create only)
+        self.assertEqual(self.client.patch(f"{path}{commitment_id}/", {"title": "StudentEdit"}).status_code, 400)
         self.client.force_authenticate(self.counselor_user)
         self.assertEqual(self.client.get(path).data["count"], 1)
-        self.assertEqual(self.client.patch(f"{path}{commitment_id}/", {"title": "Changed"}).status_code, 403)
+        self.assertEqual(self.client.patch(f"{path}{commitment_id}/", {"title": "Changed"}).status_code, 200)
         self.client.force_authenticate(self.other_counselor_user)
         self.assertEqual(self.client.get(path).data["count"], 0)
         self.client.force_authenticate(self.admin)

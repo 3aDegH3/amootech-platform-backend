@@ -13,14 +13,14 @@ from rest_framework.response import Response
 from apps.accounts.models import User
 from apps.accounts.permissions import IsStudent
 from .execution import transition
-from .models import Plan, PlanDay, PlanItem, PlanItemExecution, StudentFixedCommitment, StudentSchoolSlot
+from .models import Plan, PlanDay, PlanItem, PlanItemExecution, StudentFixedCommitment, StudentFixedEvent, StudentSchoolSlot
 from .export_service import export_plan_excel, export_plan_pdf
 from .excel_to_pdf import convert_excel_to_pdf
 from .export_exceptions import ExportConversionFailed
 from .serializers import (
     BatchCommitmentSerializer, BulkSchoolSlotsSerializer, FinishExecutionSerializer, PlanDayDetailSerializer,
     PlanDaySerializer, PlanDetailSerializer, PlanItemExecutionSerializer, PlanItemSerializer, PlanSerializer,
-    SchoolHoursSerializer, StudentFixedCommitmentSerializer, StudentSchoolSlotSerializer, manageable_plan, manageable_student,
+    SchoolHoursSerializer, StudentFixedCommitmentSerializer, StudentFixedEventSerializer, StudentSchoolSlotSerializer, manageable_plan, manageable_student,
 )
 
 
@@ -31,12 +31,12 @@ class PlanningAccess(BasePermission):
         if request.user.role == User.Role.ADMIN:
             return True
         if request.user.role == User.Role.COUNSELOR:
-            if view.basename in ("commitments", "school-slots"):
+            if view.basename in ("commitments", "school-slots", "fixed-events"):
                 return True
             return True
         if request.user.role == User.Role.STUDENT:
             # Student: can read plans/days/items and manage own commitments
-            if view.basename in ("commitments", "school-slots"):
+            if view.basename in ("commitments", "school-slots", "fixed-events"):
                 return True
             return request.method in ("GET", "HEAD", "OPTIONS")
         return False
@@ -51,10 +51,11 @@ class ProtectedReportDeleteMixin:
     @transaction.atomic
     def destroy(self, request, *args, **kwargs):
         obj = self.get_object()
-        today = timezone.localdate()
         if isinstance(obj, Plan):
-            if obj.days.filter(date__lte=today).exists():
-                return Response({"detail": "برنامه‌ای که روز گذشته یا امروز دارد قابل حذف نیست."}, status=status.HTTP_409_CONFLICT)
+            # Past-range block removed per product requirement: Plan delete no longer checks dates.
+            # Only execution/report guards remain.
+            if obj.days.filter(items__execution__isnull=False).exists() or obj.days.filter(items__report_items__isnull=False).exists():
+                return Response({"detail": "برنامه دارای فعالیت ثبت‌شده دانش‌آموز است و قابل حذف نیست."}, status=status.HTTP_409_CONFLICT)
         elif isinstance(obj, PlanDay):
             # Past-date delete block removed per product rule: all 7 PlanDays are active. Only execution/report guards remain.
             if obj.items.filter(execution__isnull=False).exists() or obj.items.filter(report_items__isnull=False).exists():
@@ -78,6 +79,103 @@ def visible_plans(user):
     if user.role == User.Role.STUDENT:
         return queryset.filter(student__user=user, status=Plan.Status.PUBLISHED)
     return queryset.none()
+
+
+def _apply_fixed_to_plan_with_report(plan):
+    """Create PlanItems for fixed commitments/slots/events. Returns (created, skipped).
+    skipped entries have keys: date, title, start, end, reason (conflict|duplicate).
+    No break/استراحت items are created per product rule.
+    """
+    from datetime import timedelta, datetime
+    from apps.planning.models import StudentFixedCommitment, StudentSchoolSlot, StudentFixedEvent
+    student = plan.student
+    days = list(PlanDay.objects.filter(plan=plan).order_by("date"))
+    date_to_day = {d.date: d for d in days}
+    commitments = list(StudentFixedCommitment.objects.filter(student=student, active=True))
+    slots_by_weekday = {}
+    for s in StudentSchoolSlot.objects.filter(student=student).order_by("weekday", "period"):
+        slots_by_weekday.setdefault(s.weekday, []).append(s)
+    events = list(StudentFixedEvent.objects.filter(student=student, active=True, date__gte=plan.start_date, date__lte=plan.end_date))
+
+    created_count = 0
+    skipped = []
+    def mins(a, b):
+        return int((datetime.combine(plan.start_date, b) - datetime.combine(plan.start_date, a)).total_seconds() // 60)
+    for pday in days:
+        existing_titles_times = set((i.title, str(i.start_time), str(i.end_time)) for i in pday.items.all())
+        wd = pday.date.weekday()
+        for c in [x for x in commitments if x.weekday == wd]:
+            if c.valid_from and pday.date < c.valid_from:
+                continue
+            if c.valid_until and pday.date > c.valid_until:
+                continue
+            if c.kind == StudentFixedCommitment.Kind.SCHOOL:
+                slots = slots_by_weekday.get(wd, [])
+                if slots:
+                    for slot in slots:
+                        if not slot.start_time or not slot.end_time:
+                            continue
+                        key = (slot.subject_name, str(slot.start_time), str(slot.end_time))
+                        if key in existing_titles_times:
+                            skipped.append({"date": str(pday.date), "title": slot.subject_name, "start": str(slot.start_time), "end": str(slot.end_time), "reason": "duplicate"})
+                            continue
+                        dur = mins(slot.start_time, slot.end_time)
+                        overlap = False
+                        for it in pday.items.all():
+                            if it.start_time and it.end_time and it.start_time < slot.end_time and it.end_time > slot.start_time:
+                                overlap = True
+                                break
+                        if overlap:
+                            skipped.append({"date": str(pday.date), "title": slot.subject_name, "start": str(slot.start_time), "end": str(slot.end_time), "reason": "conflict"})
+                            continue
+                        PlanItem.objects.create(plan_day=pday, kind=PlanItem.Kind.EVENT, title=slot.subject_name, planned_duration_minutes=dur, start_time=slot.start_time, end_time=slot.end_time, ordering=pday.items.count()+created_count, note="مدرسه")
+                        created_count += 1
+                    # NOTE: per product request, break ("استراحت"/"زنگ تفریح") items are no longer added to plan.
+                else:
+                    key = (c.title or "مدرسه", str(c.start_time), str(c.end_time))
+                    if key in existing_titles_times:
+                        skipped.append({"date": str(pday.date), "title": c.title or "مدرسه", "start": str(c.start_time), "end": str(c.end_time), "reason": "duplicate"})
+                        continue
+                    dur = mins(c.start_time, c.end_time)
+                    if any(it.start_time and it.end_time and it.start_time < c.end_time and it.end_time > c.start_time for it in pday.items.all()):
+                        skipped.append({"date": str(pday.date), "title": c.title or "مدرسه", "start": str(c.start_time), "end": str(c.end_time), "reason": "conflict"})
+                        continue
+                    PlanItem.objects.create(plan_day=pday, kind=PlanItem.Kind.EVENT, title=c.title or "مدرسه", planned_duration_minutes=dur, start_time=c.start_time, end_time=c.end_time, ordering=pday.items.count()+created_count, note="مدرسه")
+                    created_count += 1
+            else:
+                if c.kind == StudentFixedCommitment.Kind.SCHOOL:
+                    continue
+                key = (c.title, str(c.start_time), str(c.end_time))
+                if key in existing_titles_times:
+                    skipped.append({"date": str(pday.date), "title": c.title, "start": str(c.start_time), "end": str(c.end_time), "reason": "duplicate"})
+                    continue
+                dur = mins(c.start_time, c.end_time)
+                if any(it.start_time and it.end_time and it.start_time < c.end_time and it.end_time > c.start_time for it in pday.items.all()):
+                    skipped.append({"date": str(pday.date), "title": c.title, "start": str(c.start_time), "end": str(c.end_time), "reason": "conflict"})
+                    continue
+                PlanItem.objects.create(plan_day=pday, kind=PlanItem.Kind.EVENT, title=c.title, planned_duration_minutes=dur, start_time=c.start_time, end_time=c.end_time, ordering=pday.items.count()+created_count, note="برنامه ثابت")
+                created_count += 1
+        for ev in events:
+            pday = date_to_day.get(ev.date)
+            if not pday:
+                continue
+            key = (ev.title, str(ev.start_time), str(ev.end_time))
+            if key in set((i.title, str(i.start_time), str(i.end_time)) for i in pday.items.all()):
+                skipped.append({"date": str(pday.date), "title": ev.title, "start": str(ev.start_time), "end": str(ev.end_time), "reason": "duplicate"})
+                continue
+            dur = mins(ev.start_time, ev.end_time)
+            if any(it.start_time and it.end_time and it.start_time < ev.end_time and it.end_time > ev.start_time for it in pday.items.all()):
+                skipped.append({"date": str(pday.date), "title": ev.title, "start": str(ev.start_time), "end": str(ev.end_time), "reason": "conflict"})
+                continue
+            PlanItem.objects.create(plan_day=pday, kind=PlanItem.Kind.EVENT, title=ev.title, planned_duration_minutes=dur, start_time=ev.start_time, end_time=ev.end_time, ordering=pday.items.count()+created_count, note="برنامه ثابت")
+            created_count += 1
+    return created_count, skipped
+
+
+def _apply_fixed_to_plan(plan):
+    """Backward compat wrapper returning only count."""
+    created, _ = _apply_fixed_to_plan_with_report(plan)
+    return created
 
 
 class PlanViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
@@ -126,6 +224,111 @@ class PlanViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
             days = PlanDay.objects.prefetch_related(Prefetch("items", queryset=items))
             queryset = queryset.prefetch_related(Prefetch("days", queryset=days))
         return queryset
+
+    def create(self, request, *args, **kwargs):
+        apply_fixed = str(request.data.get("apply_fixed", "")).lower() in ("1", "true", "yes")
+        # Remove apply_fixed so serializer doesn't complain
+        if "apply_fixed" in request.data:
+            data = request.data.copy()
+            data.pop("apply_fixed", None)
+            request._full_data = data
+            # need to re-validate through serializer path: we call super with modified data via serializer
+            serializer = self.get_serializer(data=data)
+            serializer.is_valid(raise_exception=True)
+            self.perform_create(serializer)
+            plan = serializer.instance
+            # Ensure 7 days exist before applying fixed (like frontend does, but ensure at least start_date day)
+            from datetime import timedelta
+            for offset in range(7):
+                d = plan.start_date + timedelta(days=offset)
+                if d > plan.end_date:
+                    break
+                PlanDay.objects.get_or_create(plan=plan, date=d)
+            plan.refresh_from_db()
+            if apply_fixed:
+                # Prevent duplicate apply
+                if not plan.days.filter(items__isnull=False).exists():
+                    _apply_fixed_to_plan(plan)
+                else:
+                    # Plan already has user items (rare branch when frontend pre-created days with items) - still try to add missing fixed boxes
+                    _apply_fixed_to_plan_with_report(plan)
+                plan.refresh_from_db()
+            headers = self.get_success_headers(serializer.data)
+            # Return with days
+            from .serializers import PlanDetailSerializer as _PDS
+            detail = _PDS(plan, context=self.get_serializer_context()).data if hasattr(plan, 'days') else serializer.data
+            return Response(detail, status=status.HTTP_201_CREATED, headers=headers)
+        return super().create(request, *args, **kwargs)
+
+    @action(detail=True, methods=("post",), url_path="apply-fixed")
+    @transaction.atomic
+    def apply_fixed(self, request, pk=None):
+        """Resync fixed-schedule boxes for an existing DRAFT plan.
+        Only modifies fixed-origin items (note مدرسه / برنامه ثابت) that have no execution/report.
+        Reports created/skipped so frontend can show 'تداخل دارد' feedback.
+        """
+        plan = self.get_object()
+        if not manageable_plan(plan, request.user):
+            return Response({"detail": "This plan is not available to you."}, status=status.HTTP_403_FORBIDDEN)
+        if plan.status != Plan.Status.DRAFT:
+            return Response({"detail": "فقط برنامه پیش‌نویس قابل همگام‌سازی است."}, status=status.HTTP_409_CONFLICT)
+        from apps.planning.models import StudentFixedCommitment, StudentSchoolSlot, StudentFixedEvent
+        # Remove deletable fixed-origin items that no longer have a matching source (e.g. slot deleted / renamed)
+        # Build source keys for current fixed schedule
+        slots_by_weekday = {}
+        for s in StudentSchoolSlot.objects.filter(student=plan.student):
+            slots_by_weekday.setdefault(s.weekday, []).append((s.subject_name, str(s.start_time), str(s.end_time)))
+        commitments = list(StudentFixedCommitment.objects.filter(student=plan.student, active=True))
+        events = {(str(e.date), e.title, str(e.start_time), str(e.end_time)) for e in StudentFixedEvent.objects.filter(student=plan.student, active=True, date__gte=plan.start_date, date__lte=plan.end_date)}
+        removed = 0
+        for day in plan.days.prefetch_related("items"):
+            for item in list(day.items.all()):
+                if item.note not in ("مدرسه", "برنامه ثابت"):
+                    continue
+                if hasattr(item, "execution") or item.report_items.exists():
+                    continue
+                wd = day.date.weekday()
+                should_keep = False
+                if item.note == "مدرسه":
+                    # keep if still in slots
+                    keys = slots_by_weekday.get(wd, [])
+                    if (item.title, str(item.start_time), str(item.end_time)) in keys:
+                        should_keep = True
+                    # fallback: single SCHOOL block
+                    if not should_keep:
+                        for c in commitments:
+                            if c.kind == StudentFixedCommitment.Kind.SCHOOL and c.weekday == wd and c.valid_from and day.date < c.valid_from:
+                                continue
+                            if c.kind == StudentFixedCommitment.Kind.SCHOOL and c.weekday == wd and c.valid_until and day.date > c.valid_until:
+                                continue
+                            if c.kind == StudentFixedCommitment.Kind.SCHOOL and c.weekday == wd and not slots_by_weekday.get(wd):
+                                if (c.title or "مدرسه", str(c.start_time), str(c.end_time)) == (item.title, str(item.start_time), str(item.end_time)):
+                                    should_keep = True
+                                    break
+                else:
+                    # برنامه ثابت: check commitment or event
+                    for c in commitments:
+                        if c.kind == StudentFixedCommitment.Kind.SCHOOL:
+                            continue
+                        if c.weekday != wd:
+                            continue
+                        if c.valid_from and day.date < c.valid_from:
+                            continue
+                        if c.valid_until and day.date > c.valid_until:
+                            continue
+                        if (c.title, str(c.start_time), str(c.end_time)) == (item.title, str(item.start_time), str(item.end_time)):
+                            should_keep = True
+                            break
+                    if not should_keep and (str(day.date), item.title, str(item.start_time), str(item.end_time)) in events:
+                        should_keep = True
+                if not should_keep:
+                    item.delete()
+                    removed += 1
+        created, skipped = _apply_fixed_to_plan_with_report(plan)
+        plan.refresh_from_db()
+        from .serializers import PlanDetailSerializer as _PDS2
+        data = _PDS2(plan, context=self.get_serializer_context()).data
+        return Response({"plan": data, "created": created, "removed": removed, "skipped": skipped})
 
     def get_serializer_class(self):
         return PlanDetailSerializer if self.action == "retrieve" else PlanSerializer
@@ -535,11 +738,19 @@ class PlanItemViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
                     return Response({"detail": "این زمان با فعالیت دیگری تداخل دارد.", "code": "MOVE_CONFLICT"}, status=status.HTTP_409_CONFLICT)
             try:
                 from apps.planning.models import StudentFixedCommitment
-                weekday = target_day.date.weekday()
-                commitments = StudentFixedCommitment.objects.filter(student_id=target_day.plan.student_id, active=True, weekday=weekday)
-                for comm in commitments:
-                    if _overlaps(effective_start, effective_end, comm.start_time, comm.end_time):
-                        return Response({"detail": "این بازه با کلاس/مدرسه/تعهد ثابت دانش‌آموز تداخل دارد.", "code": "COMMITMENT_CONFLICT"}, status=status.HTTP_409_CONFLICT)
+                # Fixed-origin boxes are the materialized view of StudentFixedCommitment.
+                # After the box is moved its old slot is free, and reverting must not be
+                # blocked by the commitment that created that same box. Skip commitment
+                # check for these items; real PlanItem overlap is already enforced above
+                # and other fixed commitments remain enforced for normal boxes.
+                if item.note in ("مدرسه", "برنامه ثابت"):
+                    pass
+                else:
+                    weekday = target_day.date.weekday()
+                    commitments = StudentFixedCommitment.objects.filter(student_id=target_day.plan.student_id, active=True, weekday=weekday)
+                    for comm in commitments:
+                        if _overlaps(effective_start, effective_end, comm.start_time, comm.end_time):
+                            return Response({"detail": "این بازه با کلاس/مدرسه/تعهد ثابت دانش‌آموز تداخل دارد.", "code": "COMMITMENT_CONFLICT"}, status=status.HTTP_409_CONFLICT)
             except Exception:
                 pass
         desired = payload.validated_data.get("ordering")
@@ -672,6 +883,45 @@ class StudentFixedCommitmentViewSet(viewsets.ModelViewSet):
         obj.save(update_fields=["active"])
         return Response(StudentFixedCommitmentSerializer(obj).data)
 
+    @action(detail=False, methods=("post",), url_path="copy-school-day")
+    @transaction.atomic
+    def copy_school_day(self, request):
+        student_id = request.data.get("student")
+        source_weekday = request.data.get("source_weekday")
+        target_weekdays = request.data.get("target_weekdays")
+        if student_id is None or source_weekday is None or not target_weekdays:
+            raise serializers.ValidationError({"detail": "student, source_weekday, target_weekdays are required."})
+        try:
+            from apps.accounts.models import StudentProfile
+            student = StudentProfile.objects.get(pk=int(student_id))
+        except Exception:
+            raise serializers.ValidationError({"student": "Student not found."})
+        if not manageable_student(student, request.user) and request.user.role != User.Role.ADMIN:
+            return Response({"detail": "This student is not available to you."}, status=status.HTTP_403_FORBIDDEN)
+        source_weekday = int(source_weekday)
+        target_weekdays = [int(x) for x in target_weekdays]
+        # Source data
+        source_commit = StudentFixedCommitment.objects.filter(student=student, kind=StudentFixedCommitment.Kind.SCHOOL, weekday=source_weekday).first()
+        source_slots = list(StudentSchoolSlot.objects.filter(student=student, weekday=source_weekday).order_by("period"))
+        if not source_commit and not source_slots:
+            return Response({"detail": "مبدأ برنامه‌ای ندارد."}, status=status.HTTP_404_NOT_FOUND)
+        for twd in target_weekdays:
+            if twd == source_weekday:
+                continue
+            # Check overwrite
+            has_existing = StudentFixedCommitment.objects.filter(student=student, kind=StudentFixedCommitment.Kind.SCHOOL, weekday=twd).exists() or StudentSchoolSlot.objects.filter(student=student, weekday=twd).exists()
+            force = str(request.data.get("force", "")).lower() in ("1", "true", "yes")
+            if has_existing and not force:
+                return Response({"detail": f"روز مقصد {twd} از قبل برنامه دارد. تأیید لازم است.", "code": "NEEDS_CONFIRM", "weekday": twd}, status=status.HTTP_409_CONFLICT)
+            # Replace target
+            StudentFixedCommitment.objects.filter(student=student, kind=StudentFixedCommitment.Kind.SCHOOL, weekday=twd).delete()
+            StudentSchoolSlot.objects.filter(student=student, weekday=twd).delete()
+            if source_commit:
+                StudentFixedCommitment.objects.create(student=student, kind=StudentFixedCommitment.Kind.SCHOOL, title=source_commit.title, weekday=twd, start_time=source_commit.start_time, end_time=source_commit.end_time, active=source_commit.active, valid_from=source_commit.valid_from, valid_until=source_commit.valid_until)
+            for s in source_slots:
+                StudentSchoolSlot.objects.create(student=student, weekday=twd, period=s.period, subject_name=s.subject_name, start_time=s.start_time, end_time=s.end_time)
+        return Response({"detail": "کپی انجام شد."})
+
     @action(detail=False, methods=("post",), url_path="group-update")
     @transaction.atomic
     def group_update(self, request):
@@ -780,16 +1030,16 @@ class StudentSchoolSlotViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         student = serializer.validated_data["student"]
         slots = serializer.validated_data["slots"]
-        # Replace all slots for this student atomically (optional: or merge; we replace for simplicity but preserve untouched weekdays if not mentioned?)
-        # To keep partial edits safe, we delete existing slots that match (weekday,period) in payload and recreate them.
-        # Then return current state.
+        from django.utils.dateparse import parse_time
         for entry in slots:
             wd = int(entry["weekday"])
             period = int(entry["period"])
             name = str(entry["subject_name"]).strip()
+            st = parse_time(str(entry["start_time"])) if entry.get("start_time") else None
+            en = parse_time(str(entry["end_time"])) if entry.get("end_time") else None
             StudentSchoolSlot.objects.update_or_create(
                 student=student, weekday=wd, period=period,
-                defaults={"subject_name": name},
+                defaults={"subject_name": name, "start_time": st, "end_time": en},
             )
         return Response(StudentSchoolSlotSerializer(self.get_queryset().filter(student=student), many=True).data)
 
@@ -812,3 +1062,23 @@ class StudentSchoolSlotViewSet(viewsets.ModelViewSet):
             qs = qs.filter(weekday=int(weekday))
         qs.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class StudentFixedEventViewSet(viewsets.ModelViewSet):
+    permission_classes = (PlanningAccess,)
+    serializer_class = StudentFixedEventSerializer
+    queryset = StudentFixedEvent.objects.all()
+
+    def get_queryset(self):
+        queryset = StudentFixedEvent.objects.select_related("student__user", "student__counselor__user")
+        user = self.request.user
+        if user.role == User.Role.ADMIN:
+            scoped = queryset
+        elif user.role == User.Role.COUNSELOR:
+            scoped = queryset.filter(student__counselor__user=user)
+        else:
+            scoped = queryset.filter(student__user=user)
+        student = self.request.query_params.get("student")
+        if student and student.isdecimal():
+            scoped = scoped.filter(student_id=int(student))
+        return scoped

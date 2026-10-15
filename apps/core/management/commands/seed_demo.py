@@ -183,17 +183,13 @@ class Command(BaseCommand):
             items = []
             for day in days:
                 kinds = ["STUDY", "STUDY", "TEST", "REVIEW"]
+                # Keep demo sample compact and never seed fixed-origin lookalikes (note مدرسه/برنامه ثابت)
+                # so manual fixed-schedule demos start clean per product rule.
                 if index % 4 == 0:
                     kinds.append("TEST")
                 elif rng.random() < .75:
                     kinds.append(rng.choice(("STUDY", "TEST", "EXAM")))
-                if rng.random() < .40:
-                    kinds.append("EVENT")
                 for order, kind in enumerate(kinds):
-                    if kind == "EVENT":
-                        items.append(PlanItem(plan_day=day, kind=kind, ordering=order,
-                            title=rng.choice(EVENTS), start_time=time(17), end_time=time(18, 30)))
-                        continue
                     subject = rng.choices(focus, weights=[max(1, 7 - pos) for pos in range(len(focus))])[0]
                     chapters = list(subject.chapters.all())
                     chapter = rng.choice(chapters) if chapters else None
@@ -207,7 +203,8 @@ class Command(BaseCommand):
                         planned_duration_minutes=duration,
                         test_count=rng.choice((25, 30, 40, 40) if index % 4 == 0 else (10, 15, 20, 25, 30, 40)) if kind == "TEST" else None,
                         start_time=time(hour) if order < 2 else None,
-                        end_time=time(hour + duration // 60, duration % 60) if order < 2 else None))
+                        end_time=time(hour + duration // 60, duration % 60) if order < 2 else None,
+                        note=""))
             items = PlanItem.objects.bulk_create(items)
             by_date = {}
             for item in items:

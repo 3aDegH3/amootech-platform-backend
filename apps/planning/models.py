@@ -17,6 +17,7 @@ class Plan(models.Model):
     end_date = models.DateField()
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.DRAFT)
     published_at = models.DateTimeField(null=True, blank=True)
+    exam_dates = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -34,6 +35,19 @@ class Plan(models.Model):
             errors["published_at"] = "Draft plans cannot have a publication date."
         if self.status == self.Status.PUBLISHED and not self.published_at:
             errors["published_at"] = "Published plans require a publication date."
+        if self.exam_dates:
+            if not isinstance(self.exam_dates, list):
+                errors["exam_dates"] = "exam_dates must be a list."
+            else:
+                import re
+                iso_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+                for d in self.exam_dates:
+                    if not isinstance(d, str) or not iso_re.match(d):
+                        errors["exam_dates"] = "Each exam date must be YYYY-MM-DD."
+                        break
+                    if self.start_date and self.end_date and not (str(self.start_date) <= d <= str(self.end_date)):
+                        errors["exam_dates"] = "Exam dates must be within plan range."
+                        break
         if errors:
             raise ValidationError(errors)
 
@@ -197,18 +211,19 @@ class StudentFixedCommitment(models.Model):
 
 
 class StudentSchoolSlot(models.Model):
-    """Optional per-period lesson name for a student's school timetable.
+    """Optional per-period lesson on a weekday with explicit start/end times.
 
     Each slot represents one period (zang) on a weekday. The student must have a
     corresponding StudentFixedCommitment(kind=SCHOOL, weekday=...) for the day to be
-    considered a school day; slots without such a commitment are still stored but not
-    treated as authoritative schedule data. Period numbers start at 1.
+    considered a school day. Period numbers start at 1.
     """
 
     student = models.ForeignKey("accounts.StudentProfile", on_delete=models.CASCADE, related_name="school_slots")
     weekday = models.PositiveSmallIntegerField(choices=StudentFixedCommitment.Weekday.choices)
     period = models.PositiveSmallIntegerField()
     subject_name = models.CharField(max_length=120)
+    start_time = models.TimeField(null=True, blank=True)
+    end_time = models.TimeField(null=True, blank=True)
 
     class Meta:
         ordering = ("weekday", "period", "pk")
@@ -222,6 +237,35 @@ class StudentSchoolSlot(models.Model):
             raise ValidationError({"subject_name": "Lesson name is required."})
         if self.period < 1 or self.period > 12:
             raise ValidationError({"period": "Period must be between 1 and 12."})
+        if (self.start_time is None) != (self.end_time is None):
+            raise ValidationError({"end_time": "Start and end times must be supplied together."})
+        if self.start_time and self.end_time and self.end_time <= self.start_time:
+            raise ValidationError({"end_time": "End time must be after start time."})
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class StudentFixedEvent(models.Model):
+    """Dated one-off events (exam, session, etc.) valid only on a specific date."""
+
+    student = models.ForeignKey("accounts.StudentProfile", on_delete=models.CASCADE, related_name="fixed_events")
+    title = models.CharField(max_length=200)
+    date = models.DateField()
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+    active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("date", "start_time", "pk")
+
+    def clean(self):
+        if not self.title.strip():
+            raise ValidationError({"title": "Title is required."})
+        if self.end_time <= self.start_time:
+            raise ValidationError({"end_time": "End time must be after start time."})
 
     def save(self, *args, **kwargs):
         self.full_clean()

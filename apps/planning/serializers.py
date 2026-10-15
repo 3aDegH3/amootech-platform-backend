@@ -3,7 +3,7 @@ from rest_framework import serializers
 from django.utils import timezone
 
 from apps.accounts.models import CounselorProfile, StudentProfile, User
-from .models import Plan, PlanDay, PlanItem, PlanItemExecution, StudentFixedCommitment, StudentSchoolSlot
+from .models import Plan, PlanDay, PlanItem, PlanItemExecution, StudentFixedCommitment, StudentFixedEvent, StudentSchoolSlot
 
 
 def validate_model(serializer, attrs):
@@ -140,12 +140,11 @@ class PlanSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Plan
-        fields = ("id", "student", "counselor", "title", "start_date", "end_date", "status", "published_at", "created_at", "updated_at")
-        read_only_fields = ("status", "published_at", "created_at", "updated_at")
+        fields = ("id", "student", "counselor", "title", "start_date", "end_date", "status", "published_at", "created_at", "updated_at", "exam_dates")
 
     def validate(self, attrs):
         if self.instance and self.instance.status == Plan.Status.PUBLISHED:
-            changed = set(self.initial_data) - {"title"}
+            changed = set(self.initial_data) - {"title", "exam_dates"}
             if changed:
                 raise serializers.ValidationError("Only the title of a published plan can change; duplicate it for structural changes.")
         if {"status", "published_at"} & set(self.initial_data):
@@ -167,6 +166,23 @@ class PlanSerializer(serializers.ModelSerializer):
         end = attrs.get("end_date", self.instance.end_date if self.instance else None)
         if self.instance and start and end and self.instance.days.exclude(date__range=(start, end)).exists():
             raise serializers.ValidationError({"start_date": "Existing plan days must remain within the date range."})
+        # Validate exam_dates range against effective start/end
+        if "exam_dates" in attrs:
+            ed = attrs["exam_dates"]
+            if ed is None:
+                attrs["exam_dates"] = []
+            elif not isinstance(ed, list):
+                raise serializers.ValidationError({"exam_dates": "Must be a list of dates."})
+            elif any(not isinstance(x, str) for x in ed):
+                raise serializers.ValidationError({"exam_dates": "Each date must be YYYY-MM-DD."})
+            # also check within range
+            s = str(start) if start else None
+            e = str(end) if end else None
+            if s and e:
+                for d in ed:
+                    if not (s <= d <= e):
+                        raise serializers.ValidationError({"exam_dates": "Exam dates must be within plan range."})
+                        break
         return validate_model(self, attrs)
 
 
@@ -230,7 +246,7 @@ class StudentSchoolSlotSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = StudentSchoolSlot
-        fields = ("id", "student", "weekday", "period", "subject_name")
+        fields = ("id", "student", "weekday", "period", "subject_name", "start_time", "end_time")
 
     def validate(self, attrs):
         user = self.context["request"].user
@@ -250,6 +266,37 @@ class StudentSchoolSlotSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError("This school slot is not available to you.")
         elif user.role == User.Role.STUDENT:
             raise serializers.ValidationError("Students cannot modify school timetable.")
+        if "student" not in attrs and not self.instance:
+            raise serializers.ValidationError({"student": "This field is required."})
+        return validate_model(self, attrs)
+
+
+class StudentFixedEventSerializer(serializers.ModelSerializer):
+    student = serializers.PrimaryKeyRelatedField(queryset=StudentProfile.objects.all(), required=False)
+
+    class Meta:
+        model = StudentFixedEvent
+        fields = ("id", "student", "title", "date", "start_time", "end_time", "active", "created_at")
+        read_only_fields = ("created_at",)
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+        student = attrs.get("student", self.instance.student if self.instance else None)
+        if not student and "student" in self.initial_data:
+            try:
+                student = StudentProfile.objects.get(pk=self.initial_data["student"])
+                attrs["student"] = student
+            except Exception:
+                pass
+        if user.role == User.Role.COUNSELOR:
+            if student and not manageable_student(student, user):
+                raise serializers.ValidationError({"student": "This student is not assigned to you."})
+            if not student and not self.instance:
+                raise serializers.ValidationError({"student": "This field is required."})
+            if "student" not in attrs and self.instance and not manageable_student(self.instance.student, user):
+                raise serializers.ValidationError("This fixed event is not available to you.")
+        elif user.role == User.Role.STUDENT:
+            raise serializers.ValidationError("Students cannot modify fixed events.")
         if "student" not in attrs and not self.instance:
             raise serializers.ValidationError({"student": "This field is required."})
         return validate_model(self, attrs)
@@ -316,6 +363,7 @@ class BulkSchoolSlotsSerializer(serializers.Serializer):
 
     def validate_slots(self, value):
         seen = set()
+        from django.utils.dateparse import parse_time
         for entry in value:
             try:
                 wd = int(entry.get("weekday"))
@@ -329,6 +377,17 @@ class BulkSchoolSlotsSerializer(serializers.Serializer):
                 raise serializers.ValidationError("Period must be 1-12.")
             if not name:
                 raise serializers.ValidationError("Lesson name is required.")
+            st = entry.get("start_time")
+            en = entry.get("end_time")
+            if (st is None) != (en is None):
+                raise serializers.ValidationError("Start and end times must be supplied together for each slot.")
+            if st and en:
+                ps = parse_time(str(st))
+                pe = parse_time(str(en))
+                if not ps or not pe:
+                    raise serializers.ValidationError("Invalid time in slot.")
+                if pe <= ps:
+                    raise serializers.ValidationError("Slot end time must be after start time.")
             key = (wd, period)
             if key in seen:
                 raise serializers.ValidationError(f"Duplicate slot for weekday {wd} period {period}.")

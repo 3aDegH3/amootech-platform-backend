@@ -20,7 +20,7 @@ from .export_exceptions import ExportConversionFailed
 from .serializers import (
     BatchCommitmentSerializer, BulkSchoolSlotsSerializer, FinishExecutionSerializer, PlanDayDetailSerializer,
     PlanDaySerializer, PlanDetailSerializer, PlanItemExecutionSerializer, PlanItemSerializer, PlanSerializer,
-    SchoolHoursSerializer, StudentFixedCommitmentSerializer, StudentFixedEventSerializer, StudentSchoolSlotSerializer, manageable_plan, manageable_student,
+    SchoolHoursSerializer, StudentFixedCommitmentSerializer, StudentFixedEventSerializer, StudentSchoolSlotSerializer, manageable_plan, manageable_student, item_has_student_data,
 )
 
 
@@ -81,100 +81,75 @@ def visible_plans(user):
     return queryset.none()
 
 
-def _apply_fixed_to_plan_with_report(plan):
-    """Create PlanItems for fixed commitments/slots/events. Returns (created, skipped).
-    skipped entries have keys: date, title, start, end, reason (conflict|duplicate).
-    No break/استراحت items are created per product rule.
-    """
-    from datetime import timedelta, datetime
-    from apps.planning.models import StudentFixedCommitment, StudentSchoolSlot, StudentFixedEvent
-    student = plan.student
-    days = list(PlanDay.objects.filter(plan=plan).order_by("date"))
-    date_to_day = {d.date: d for d in days}
-    commitments = list(StudentFixedCommitment.objects.filter(student=student, active=True))
-    slots_by_weekday = {}
-    for s in StudentSchoolSlot.objects.filter(student=student).order_by("weekday", "period"):
-        slots_by_weekday.setdefault(s.weekday, []).append(s)
-    events = list(StudentFixedEvent.objects.filter(student=student, active=True, date__gte=plan.start_date, date__lte=plan.end_date))
+def _fixed_sources(student, date):
+    commitments = StudentFixedCommitment.objects.filter(student=student, active=True, weekday=date.weekday())
+    slots = list(StudentSchoolSlot.objects.filter(student=student, weekday=date.weekday(), start_time__isnull=False, end_time__isnull=False))
+    for source in commitments:
+        if source.valid_from and date < source.valid_from or source.valid_until and date > source.valid_until:
+            continue
+        if source.kind == StudentFixedCommitment.Kind.SCHOOL and slots:
+            continue
+        yield "commitment", source, source.title, "مدرسه" if source.kind == StudentFixedCommitment.Kind.SCHOOL else "برنامه ثابت"
+    for source in slots:
+        yield "school_slot", source, source.subject_name, "مدرسه"
+    for source in StudentFixedEvent.objects.filter(student=student, active=True, date=date):
+        yield "event", source, source.title, "برنامه ثابت"
 
-    created_count = 0
+
+@transaction.atomic
+def _apply_fixed_to_plan_with_report(plan):
+    """Reconcile by source identity; legacy editable boxes are replaced once."""
+    from datetime import datetime
+    # Serialize apply requests for this plan, including empty plans.
+    Plan.objects.select_for_update().get(pk=plan.pk)
+    desired = {}
+    for day in plan.days.all():
+        for source_type, source, title, note in _fixed_sources(plan.student, day.date):
+            desired[(source_type, source.pk, day.date)] = (day, source, title, note)
+    existing = {}
+    removed = 0
+    for item in PlanItem.objects.filter(plan_day__plan=plan).select_related("plan_day"):
+        if not item.fixed_source_type and item.note not in ("مدرسه", "برنامه ثابت"):
+            continue
+        key = (item.fixed_source_type, item.fixed_source_id, item.plan_day.date)
+        if key in desired and key not in existing:
+            existing[key] = item
+        elif not item_has_student_data(item):
+            item.delete()
+            removed += 1
+    created = 0
     skipped = []
-    def mins(a, b):
-        return int((datetime.combine(plan.start_date, b) - datetime.combine(plan.start_date, a)).total_seconds() // 60)
-    for pday in days:
-        existing_titles_times = set((i.title, str(i.start_time), str(i.end_time)) for i in pday.items.all())
-        wd = pday.date.weekday()
-        for c in [x for x in commitments if x.weekday == wd]:
-            if c.valid_from and pday.date < c.valid_from:
-                continue
-            if c.valid_until and pday.date > c.valid_until:
-                continue
-            if c.kind == StudentFixedCommitment.Kind.SCHOOL:
-                slots = slots_by_weekday.get(wd, [])
-                if slots:
-                    for slot in slots:
-                        if not slot.start_time or not slot.end_time:
-                            continue
-                        key = (slot.subject_name, str(slot.start_time), str(slot.end_time))
-                        if key in existing_titles_times:
-                            skipped.append({"date": str(pday.date), "title": slot.subject_name, "start": str(slot.start_time), "end": str(slot.end_time), "reason": "duplicate"})
-                            continue
-                        dur = mins(slot.start_time, slot.end_time)
-                        overlap = False
-                        for it in pday.items.all():
-                            if it.start_time and it.end_time and it.start_time < slot.end_time and it.end_time > slot.start_time:
-                                overlap = True
-                                break
-                        if overlap:
-                            skipped.append({"date": str(pday.date), "title": slot.subject_name, "start": str(slot.start_time), "end": str(slot.end_time), "reason": "conflict"})
-                            continue
-                        PlanItem.objects.create(plan_day=pday, kind=PlanItem.Kind.EVENT, title=slot.subject_name, planned_duration_minutes=dur, start_time=slot.start_time, end_time=slot.end_time, ordering=pday.items.count()+created_count, note="مدرسه")
-                        created_count += 1
-                    # NOTE: per product request, break ("استراحت"/"زنگ تفریح") items are no longer added to plan.
-                else:
-                    key = (c.title or "مدرسه", str(c.start_time), str(c.end_time))
-                    if key in existing_titles_times:
-                        skipped.append({"date": str(pday.date), "title": c.title or "مدرسه", "start": str(c.start_time), "end": str(c.end_time), "reason": "duplicate"})
-                        continue
-                    dur = mins(c.start_time, c.end_time)
-                    if any(it.start_time and it.end_time and it.start_time < c.end_time and it.end_time > c.start_time for it in pday.items.all()):
-                        skipped.append({"date": str(pday.date), "title": c.title or "مدرسه", "start": str(c.start_time), "end": str(c.end_time), "reason": "conflict"})
-                        continue
-                    PlanItem.objects.create(plan_day=pday, kind=PlanItem.Kind.EVENT, title=c.title or "مدرسه", planned_duration_minutes=dur, start_time=c.start_time, end_time=c.end_time, ordering=pday.items.count()+created_count, note="مدرسه")
-                    created_count += 1
-            else:
-                if c.kind == StudentFixedCommitment.Kind.SCHOOL:
-                    continue
-                key = (c.title, str(c.start_time), str(c.end_time))
-                if key in existing_titles_times:
-                    skipped.append({"date": str(pday.date), "title": c.title, "start": str(c.start_time), "end": str(c.end_time), "reason": "duplicate"})
-                    continue
-                dur = mins(c.start_time, c.end_time)
-                if any(it.start_time and it.end_time and it.start_time < c.end_time and it.end_time > c.start_time for it in pday.items.all()):
-                    skipped.append({"date": str(pday.date), "title": c.title, "start": str(c.start_time), "end": str(c.end_time), "reason": "conflict"})
-                    continue
-                PlanItem.objects.create(plan_day=pday, kind=PlanItem.Kind.EVENT, title=c.title, planned_duration_minutes=dur, start_time=c.start_time, end_time=c.end_time, ordering=pday.items.count()+created_count, note="برنامه ثابت")
-                created_count += 1
-        for ev in events:
-            pday = date_to_day.get(ev.date)
-            if not pday:
-                continue
-            key = (ev.title, str(ev.start_time), str(ev.end_time))
-            if key in set((i.title, str(i.start_time), str(i.end_time)) for i in pday.items.all()):
-                skipped.append({"date": str(pday.date), "title": ev.title, "start": str(ev.start_time), "end": str(ev.end_time), "reason": "duplicate"})
-                continue
-            dur = mins(ev.start_time, ev.end_time)
-            if any(it.start_time and it.end_time and it.start_time < ev.end_time and it.end_time > ev.start_time for it in pday.items.all()):
-                skipped.append({"date": str(pday.date), "title": ev.title, "start": str(ev.start_time), "end": str(ev.end_time), "reason": "conflict"})
-                continue
-            PlanItem.objects.create(plan_day=pday, kind=PlanItem.Kind.EVENT, title=ev.title, planned_duration_minutes=dur, start_time=ev.start_time, end_time=ev.end_time, ordering=pday.items.count()+created_count, note="برنامه ثابت")
-            created_count += 1
-    return created_count, skipped
+    for key, (day, source, title, note) in desired.items():
+        item = existing.get(key)
+        if item and item_has_student_data(item):
+            continue
+        overlaps = day.items.filter(start_time__lt=source.end_time, end_time__gt=source.start_time)
+        if item:
+            overlaps = overlaps.exclude(pk=item.pk)
+        editable_fixed_ids = [entry.pk for entry in existing.values() if not item_has_student_data(entry)]
+        overlaps = overlaps.exclude(pk__in=editable_fixed_ids)
+        source_overlap = any(other_key != key and other_day.pk == day.pk and other_source.start_time < source.end_time and other_source.end_time > source.start_time for other_key, (other_day, other_source, _, _) in desired.items())
+        if overlaps.exists() or source_overlap:
+            skipped.append({"date": str(day.date), "title": title, "start": str(source.start_time), "end": str(source.end_time), "reason": "conflict"})
+            # Release a stale reservation if the source changed into a conflict.
+            if item and (item.start_time != source.start_time or item.end_time != source.end_time):
+                item.delete()
+                removed += 1
+            continue
+        if not item:
+            item = PlanItem(plan_day=day, kind=PlanItem.Kind.EVENT, ordering=day.items.count())
+            created += 1
+        item.title, item.note = title, note
+        item.start_time, item.end_time = source.start_time, source.end_time
+        item.planned_duration_minutes = int((datetime.combine(day.date, source.end_time) - datetime.combine(day.date, source.start_time)).total_seconds() // 60)
+        item.fixed_source_type, item.fixed_source_id = key[:2]
+        item.save()
+    return created, skipped, removed
 
 
 def _apply_fixed_to_plan(plan):
     """Backward compat wrapper returning only count."""
-    created, _ = _apply_fixed_to_plan_with_report(plan)
+    created, _, _ = _apply_fixed_to_plan_with_report(plan)
     return created
 
 
@@ -272,59 +247,7 @@ class PlanViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
             return Response({"detail": "This plan is not available to you."}, status=status.HTTP_403_FORBIDDEN)
         if plan.status != Plan.Status.DRAFT:
             return Response({"detail": "فقط برنامه پیش‌نویس قابل همگام‌سازی است."}, status=status.HTTP_409_CONFLICT)
-        from apps.planning.models import StudentFixedCommitment, StudentSchoolSlot, StudentFixedEvent
-        # Remove deletable fixed-origin items that no longer have a matching source (e.g. slot deleted / renamed)
-        # Build source keys for current fixed schedule
-        slots_by_weekday = {}
-        for s in StudentSchoolSlot.objects.filter(student=plan.student):
-            slots_by_weekday.setdefault(s.weekday, []).append((s.subject_name, str(s.start_time), str(s.end_time)))
-        commitments = list(StudentFixedCommitment.objects.filter(student=plan.student, active=True))
-        events = {(str(e.date), e.title, str(e.start_time), str(e.end_time)) for e in StudentFixedEvent.objects.filter(student=plan.student, active=True, date__gte=plan.start_date, date__lte=plan.end_date)}
-        removed = 0
-        for day in plan.days.prefetch_related("items"):
-            for item in list(day.items.all()):
-                if item.note not in ("مدرسه", "برنامه ثابت"):
-                    continue
-                if hasattr(item, "execution") or item.report_items.exists():
-                    continue
-                wd = day.date.weekday()
-                should_keep = False
-                if item.note == "مدرسه":
-                    # keep if still in slots
-                    keys = slots_by_weekday.get(wd, [])
-                    if (item.title, str(item.start_time), str(item.end_time)) in keys:
-                        should_keep = True
-                    # fallback: single SCHOOL block
-                    if not should_keep:
-                        for c in commitments:
-                            if c.kind == StudentFixedCommitment.Kind.SCHOOL and c.weekday == wd and c.valid_from and day.date < c.valid_from:
-                                continue
-                            if c.kind == StudentFixedCommitment.Kind.SCHOOL and c.weekday == wd and c.valid_until and day.date > c.valid_until:
-                                continue
-                            if c.kind == StudentFixedCommitment.Kind.SCHOOL and c.weekday == wd and not slots_by_weekday.get(wd):
-                                if (c.title or "مدرسه", str(c.start_time), str(c.end_time)) == (item.title, str(item.start_time), str(item.end_time)):
-                                    should_keep = True
-                                    break
-                else:
-                    # برنامه ثابت: check commitment or event
-                    for c in commitments:
-                        if c.kind == StudentFixedCommitment.Kind.SCHOOL:
-                            continue
-                        if c.weekday != wd:
-                            continue
-                        if c.valid_from and day.date < c.valid_from:
-                            continue
-                        if c.valid_until and day.date > c.valid_until:
-                            continue
-                        if (c.title, str(c.start_time), str(c.end_time)) == (item.title, str(item.start_time), str(item.end_time)):
-                            should_keep = True
-                            break
-                    if not should_keep and (str(day.date), item.title, str(item.start_time), str(item.end_time)) in events:
-                        should_keep = True
-                if not should_keep:
-                    item.delete()
-                    removed += 1
-        created, skipped = _apply_fixed_to_plan_with_report(plan)
+        created, skipped, removed = _apply_fixed_to_plan_with_report(plan)
         plan.refresh_from_db()
         from .serializers import PlanDetailSerializer as _PDS2
         data = _PDS2(plan, context=self.get_serializer_context()).data
@@ -690,6 +613,7 @@ class PlanItemViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
     @transaction.atomic
     def move(self, request, pk=None):
         item = self.get_object()
+        Plan.objects.select_for_update().get(pk=item.plan_day.plan_id)
         if hasattr(item, "execution") or item.report_items.exists():
             return Response({"detail": "این باکس توسط دانش‌آموز شروع یا ثبت شده و قابل جابه‌جایی نیست."}, status=status.HTTP_409_CONFLICT)
         payload = MoveItemSerializer(data=request.data)
@@ -736,23 +660,30 @@ class PlanItemViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
             for other in other_items:
                 if _overlaps(effective_start, effective_end, other.start_time, other.end_time):
                     return Response({"detail": "این زمان با فعالیت دیگری تداخل دارد.", "code": "MOVE_CONFLICT"}, status=status.HTTP_409_CONFLICT)
+            for source_type, source, _, _ in _fixed_sources(target_day.plan.student, target_day.date):
+                if (source_type, source.pk) == (item.fixed_source_type, item.fixed_source_id):
+                    continue
+                if _overlaps(effective_start, effective_end, source.start_time, source.end_time):
+                    return Response({"detail": "این بازه با برنامه ثابت دانش‌آموز تداخل دارد.", "code": "COMMITMENT_CONFLICT"}, status=status.HTTP_409_CONFLICT)
+        source = None
+        if item.fixed_source_type:
+            source_model = {"school_slot": StudentSchoolSlot, "commitment": StudentFixedCommitment, "event": StudentFixedEvent}[item.fixed_source_type]
+            source = source_model.objects.select_for_update().filter(pk=item.fixed_source_id, student=target_day.plan.student).first()
+            if not source:
+                raise serializers.ValidationError("منبع این باکس حذف شده است؛ برنامه‌های ثابت را همگام کنید.")
+            if not effective_start or not effective_end:
+                raise serializers.ValidationError("باکس ثابت باید ساعت شروع و پایان داشته باشد.")
+            source.start_time, source.end_time = effective_start, effective_end
+            if item.fixed_source_type == "event":
+                source.date = target_day.date
+            else:
+                source.weekday = target_day.date.weekday()
             try:
-                from apps.planning.models import StudentFixedCommitment
-                # Fixed-origin boxes are the materialized view of StudentFixedCommitment.
-                # After the box is moved its old slot is free, and reverting must not be
-                # blocked by the commitment that created that same box. Skip commitment
-                # check for these items; real PlanItem overlap is already enforced above
-                # and other fixed commitments remain enforced for normal boxes.
-                if item.note in ("مدرسه", "برنامه ثابت"):
-                    pass
-                else:
-                    weekday = target_day.date.weekday()
-                    commitments = StudentFixedCommitment.objects.filter(student_id=target_day.plan.student_id, active=True, weekday=weekday)
-                    for comm in commitments:
-                        if _overlaps(effective_start, effective_end, comm.start_time, comm.end_time):
-                            return Response({"detail": "این بازه با کلاس/مدرسه/تعهد ثابت دانش‌آموز تداخل دارد.", "code": "COMMITMENT_CONFLICT"}, status=status.HTTP_409_CONFLICT)
-            except Exception:
-                pass
+                source.full_clean()
+            except DjangoValidationError as error:
+                raise serializers.ValidationError(error.message_dict) from error
+        elif item.note in ("مدرسه", "برنامه ثابت"):
+            raise serializers.ValidationError("ابتدا برنامه مدرسه و رویدادهای ثابت را به برنامه اضافه کنید تا منبع باکس مشخص شود.")
         desired = payload.validated_data.get("ordering")
         original_day_id = item.plan_day_id
         item.plan_day = target_day
@@ -771,6 +702,14 @@ class PlanItemViewSet(ProtectedReportDeleteMixin, viewsets.ModelViewSet):
             item.full_clean()
         except DjangoValidationError as error:
             raise serializers.ValidationError(error.message_dict if hasattr(error, "message_dict") else error.messages) from error
+        if source:
+            source.save()
+            if item.fixed_source_type == "school_slot" and original_day_id != target_day.pk:
+                original_date = PlanDay.objects.get(pk=original_day_id).date
+                # A school envelope is only a fallback when no periods exist. Moving
+                # the last period must not resurrect that envelope at the old time.
+                if not StudentSchoolSlot.objects.filter(student=target_day.plan.student, weekday=original_date.weekday(), start_time__isnull=False, end_time__isnull=False).exists():
+                    StudentFixedCommitment.objects.filter(student=target_day.plan.student, kind=StudentFixedCommitment.Kind.SCHOOL, weekday=original_date.weekday()).update(active=False)
         item.save()
         for new_idx, entry in enumerate(items):
             if entry.pk == item.pk:

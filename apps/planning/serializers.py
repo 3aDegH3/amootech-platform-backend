@@ -57,7 +57,9 @@ class PlanItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PlanItem
-        fields = ("id", "plan_day", "kind", "ordering", "title", "planned_duration_minutes", "start_time", "end_time", "note", "subject", "subject_name", "chapter", "chapter_name", "topic", "topic_name", "test_count", "counselor_editable", "edit_lock_reason")
+        fields = ("id", "plan_day", "kind", "ordering", "title", "planned_duration_minutes", "start_time", "end_time", "note", "subject", "subject_name", "chapter", "chapter_name", "topic", "topic_name", "test_count", "fixed_source_type", "fixed_source_id", "counselor_editable", "edit_lock_reason")
+
+        read_only_fields = ("fixed_source_type", "fixed_source_id")
 
     def get_counselor_editable(self, obj):
         # Date no longer determines editability; only student data locks the item.

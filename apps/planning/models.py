@@ -93,6 +93,8 @@ class PlanItem(models.Model):
     chapter = models.ForeignKey("academics.Chapter", on_delete=models.PROTECT, null=True, blank=True)
     topic = models.ForeignKey("academics.Topic", on_delete=models.PROTECT, null=True, blank=True)
     test_count = models.PositiveIntegerField(null=True, blank=True)
+    fixed_source_type = models.CharField(max_length=16, blank=True, choices=(("school_slot", "School slot"), ("commitment", "Commitment"), ("event", "Event")))
+    fixed_source_id = models.PositiveBigIntegerField(null=True, blank=True)
 
     class Meta:
         ordering = ("ordering", "pk")

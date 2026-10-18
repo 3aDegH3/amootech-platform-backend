@@ -33,6 +33,7 @@ INSTALLED_APPS = [
     "apps.accounts",
     "apps.academics",
     "apps.planning",
+    "apps.exams",
     "apps.daily_reports",
     "apps.core",
     "apps.telegram",
@@ -43,6 +44,13 @@ TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "").strip()
 TELEGRAM_BOT_SERVICE_TOKEN = os.getenv("TELEGRAM_BOT_SERVICE_TOKEN", "").strip()
 TELEGRAM_BOT_CONTROL_BASE_URL = os.getenv("TELEGRAM_BOT_CONTROL_BASE_URL", "").strip().rstrip("/")
 TELEGRAM_BOT_CONTROL_TOKEN = os.getenv("TELEGRAM_BOT_CONTROL_TOKEN", "").strip()
+QUIZ24_BASE_URL = os.getenv("QUIZ24_BASE_URL", "https://www.quiz24.ir/api/v1/").strip()
+QUIZ24_API_KEY = os.getenv("QUIZ24_API_KEY", "").strip()
+QUIZ24_USER_ID = os.getenv("QUIZ24_USER_ID", "").strip()
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000" if DEBUG else "").strip().rstrip("/")
+QUIZ24_CALLBACK_URL = os.getenv("QUIZ24_CALLBACK_URL", "").strip()
+QUIZ24_STUDENT_CALLBACK_URL = os.getenv("QUIZ24_STUDENT_CALLBACK_URL", "").strip()
+
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "corsheaders.middleware.CorsMiddleware",
@@ -127,3 +135,8 @@ SPECTACULAR_SETTINGS = {
     "DESCRIPTION": "Amootech educational counseling platform API.",
     "VERSION": "1.0.0",
 }
+
+# A production SMS backend must implement send(mobile, code, *, student_id, nonce).
+STUDENT_OTP_BACKEND = os.getenv("STUDENT_OTP_BACKEND", "").strip()
+STUDENT_OTP_DEV_ENABLED = os.getenv("STUDENT_OTP_DEV_ENABLED", "false").lower() in {"1", "true", "yes"}
+STUDENT_OTP_DEV_OUTBOX = os.getenv("STUDENT_OTP_DEV_OUTBOX", "/tmp/amootech-mobile-otp")

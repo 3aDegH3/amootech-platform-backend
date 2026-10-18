@@ -1,9 +1,12 @@
 from django.db.models import Count, Q
 from django.utils import timezone
-from rest_framework import viewsets
+from rest_framework import viewsets, serializers
+from rest_framework.decorators import action
+from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from .models import User, StudentProfile, CounselorProfile
 from .profile_serializers import StudentSerializer, CounselorSerializer
+from .permissions import IsAdmin, IsCounselor
 
 
 class AdminWrite(IsAuthenticated):
@@ -17,6 +20,30 @@ class StudentViewSet(viewsets.ModelViewSet):
     serializer_class = StudentSerializer
     permission_classes = (AdminWrite,)
     queryset = StudentProfile.objects.select_related("user", "counselor__user", "grade", "field").order_by("pk")
+
+    def get_permissions(self):
+        if self.action in ("create", "mobile"):
+            return [(IsAdmin | IsCounselor)()]
+        return super().get_permissions()
+
+    def perform_create(self, serializer):
+        if self.request.user.role == User.Role.COUNSELOR:
+            if not hasattr(self.request.user, "counselor_profile"):
+                raise serializers.ValidationError("پروفایل مشاور موجود نیست.")
+            if "counselor" in self.request.data:
+                raise serializers.ValidationError("مشاور دانش‌آموز به‌صورت خودکار تعیین می‌شود.")
+            serializer.save(counselor=self.request.user.counselor_profile)
+        else:
+            serializer.save()
+
+    @action(detail=True, methods=("patch",))
+    def mobile(self, request, pk=None):
+        if set(request.data) != {"mobile"}:
+            raise serializers.ValidationError("فقط شماره موبایل قابل ویرایش است.")
+        serializer = self.get_serializer(self.get_object(), data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
 
     def get_queryset(self):
         from apps.planning.models import Plan

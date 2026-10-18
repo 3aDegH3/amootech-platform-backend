@@ -19,7 +19,7 @@ run all commands from this repository.
 
 ```bash
 docker compose up --build
-docker compose up -d --build
+docker compose up -d --build --wait --wait-timeout 180
 ```
 
 - Frontend: http://localhost:3000
@@ -34,7 +34,25 @@ installation requires the default build network (for example, Docker Desktop).
 
 The browser-facing `NEXT_PUBLIC_API_BASE_URL` defaults to
 `http://localhost:8000/api/v1`. The database hostname inside Compose is `db`.
-PostgreSQL is intentionally not published to the host.
+PostgreSQL is intentionally not published to the host. Database health checks
+verify an authenticated TCP connection, and the API health endpoint verifies a
+live database query. The frontend starts after the backend is healthy.
+
+Backend startup verifies database connectivity and applies pending migrations
+before launching Django. A failed connection or migration stops startup with a
+nonzero exit code. Logs are rotated, application containers run with an init
+process, and services restart unless explicitly stopped.
+
+This configuration runs the development servers with source mounts. Python's
+local `.venv` is not required for Docker commands. Rebuild images after changing
+dependencies; if the existing frontend dependency volume is stale, update it with
+`docker compose run --rm --no-deps --user root frontend npm ci`, then restart the
+frontend.
+
+Changing `POSTGRES_PASSWORD` in `.env` does not update the database role password
+inside an existing `postgres_data` volume. Keep the existing credentials or change
+the role password explicitly before restarting. Do not replace an existing `.env`
+with `.env.example`; preserve service tokens and existing database credentials.
 
 ## Common commands
 
@@ -58,7 +76,7 @@ you explicitly want to delete local database data and the other Compose volumes.
 
 The project uses the `accounts.User` custom user model and JWT endpoints under
 `/api/v1/auth/`. Public registration is intentionally not available. After a
-fresh database is created, apply migrations explicitly with the command above.
+fresh database is created, backend startup applies migrations automatically.
 Tests create and destroy a separate PostgreSQL test database.
 
 Run `seed_academics` after migrations to load grade 10–12 planning subjects,

@@ -1,6 +1,13 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   db:
     image: postgres:17-alpine
+    logging: *default-logging
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
@@ -8,7 +15,9 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      test:
+        - CMD-SHELL
+        - PGPASSWORD="$${POSTGRES_PASSWORD}" psql -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" -tAc 'SELECT 1' >/dev/null
       interval: 5s
       timeout: 5s
       retries: 10
@@ -16,11 +25,19 @@ services:
     restart: unless-stopped
 
   backend:
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 20s
+    logging: *default-logging
     build:
       context: .
       network: ${DOCKER_BUILD_NETWORK:-host}
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     env_file: .env
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      RUN_MIGRATIONS: "true"
     volumes:
       - .:/app
     extra_hosts:
@@ -31,18 +48,24 @@ services:
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/', timeout=2)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/', timeout=2)"]
       interval: 10s
       timeout: 3s
       retries: 5
-      start_period: 10s
+      start_period: 60s
 
   frontend:
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 20s
+    logging: *default-logging
     build:
       context: ../amootech-platform-frontend
+      target: development
     environment:
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000/api/v1}
       WATCHPACK_POLLING: "true"
+      NEXT_TELEMETRY_DISABLED: "1"
     volumes:
       - ../amootech-platform-frontend:/app
       - frontend_node_modules:/app/node_modules
@@ -50,6 +73,12 @@ services:
     ports:
       - "3000:3000"
     command: npm run dev -- --hostname 0.0.0.0
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     depends_on:
       backend:
         condition: service_healthy

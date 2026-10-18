@@ -1,6 +1,7 @@
 .git
 .gitignore
-.env
+.env*
+!.env.example
 .venv
 __pycache__
 *.py[cod]
@@ -10,3 +11,9 @@ htmlcov
 db.sqlite3
 .idea
 .vscode
+
+venv
+*.dump
+*.log
+.mypy_cache
+.ruff_cache

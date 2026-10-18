@@ -1,4 +1,6 @@
-from django.db import transaction
+from django.db import IntegrityError, transaction
+from django.core.exceptions import ValidationError as DjangoValidationError
+from .mobile import normalize_mobile
 from rest_framework import serializers
 from .models import User, StudentProfile, CounselorProfile
 from apps.academics.models import Grade, Field
@@ -63,7 +65,24 @@ class CounselorSerializer(ProfileSerializer):
         return instance
 
 
+MOBILE_FIELDS = ("mobile", "mobile_verified_at", "quiz24_student_id", "quiz24_sync_status", "quiz24_sync_error", "quiz24_sync_at")
+MOBILE_READONLY = MOBILE_FIELDS[1:]
+
+
 class StudentSerializer(ProfileSerializer):
+    mobile = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+    def validate_mobile(self, value):
+        if not value:
+            return None
+        try:
+            value = normalize_mobile(value)
+        except DjangoValidationError:
+            raise serializers.ValidationError("شماره موبایل معتبر نیست.")
+        if StudentProfile.objects.filter(mobile=value).exclude(pk=self.instance.pk if self.instance else None).exists():
+            raise serializers.ValidationError("این شماره قابل استفاده نیست.")
+        return value
+
     counselor_user = ProfileUserSerializer(source="counselor.user", read_only=True)
     grade_name = serializers.CharField(source="grade.name", read_only=True)
     field_name = serializers.CharField(source="field.name", read_only=True)
@@ -73,7 +92,8 @@ class StudentSerializer(ProfileSerializer):
 
     class Meta:
         model = StudentProfile
-        fields = ("id", "user", "username", "password", "email", "first_name", "last_name", "is_active", "counselor", "counselor_user", "grade", "grade_name", "field", "field_name", "school_name", "current_plan", "telegram_status", "reports_today")
+        fields = ("id", "user", "username", "password", "email", "first_name", "last_name", "is_active", "counselor", "counselor_user", "grade", "grade_name", "field", "field_name", "school_name", "current_plan", "telegram_status", "reports_today") + MOBILE_FIELDS
+        read_only_fields = MOBILE_READONLY
 
     def get_current_plan(self, obj):
         # Annotated or fallback: look for current published plan
@@ -105,6 +125,8 @@ class StudentSerializer(ProfileSerializer):
         return None
 
     def validate(self, attrs):
+        if set(self.initial_data) & set(MOBILE_READONLY):
+            raise serializers.ValidationError("وضعیت تأیید و اتصال را نمی‌توان به‌صورت دستی تغییر داد.")
         attrs = super().validate(attrs)
         grade = attrs.get("grade", self.instance.grade if self.instance else None)
         field = attrs.get("field", self.instance.field if self.instance else None)
@@ -114,14 +136,21 @@ class StudentSerializer(ProfileSerializer):
 
     @transaction.atomic
     def create(self, validated_data):
-        return StudentProfile.objects.create(user=self.save_user(validated_data, User.Role.STUDENT), **validated_data)
+        try:
+            return StudentProfile.objects.create(user=self.save_user(validated_data, User.Role.STUDENT), **validated_data)
+        except (IntegrityError, DjangoValidationError):
+            raise serializers.ValidationError({"mobile": "اطلاعات حساب یا شماره موبایل قابل ثبت نیست."}) from None
 
     @transaction.atomic
     def update(self, instance, validated_data):
+        instance = StudentProfile.objects.select_for_update().get(pk=instance.pk)
         self.save_user(validated_data, User.Role.STUDENT)
         for key, value in validated_data.items():
             setattr(instance, key, value)
-        instance.save()
+        try:
+            instance.save()
+        except (IntegrityError, DjangoValidationError):
+            raise serializers.ValidationError({"mobile": "اطلاعات حساب یا شماره موبایل قابل ثبت نیست."}) from None
         return instance
 
 
@@ -134,7 +163,8 @@ class StudentRegistrationSerializer(StudentSerializer):
     field = serializers.PrimaryKeyRelatedField(queryset=Field.objects.filter(is_active=True, grade__is_active=True), required=True)
 
     class Meta(StudentSerializer.Meta):
-        fields = ("id", "user", "username", "password", "email", "first_name", "last_name", "grade", "field", "school_name")
+        fields = ("id", "user", "username", "password", "email", "first_name", "last_name", "grade", "field", "school_name") + MOBILE_FIELDS
+        read_only_fields = MOBILE_READONLY
 
     def validate(self, attrs):
         forbidden = {"role", "counselor", "is_active", "is_staff", "is_superuser"} & set(self.initial_data)
@@ -145,7 +175,8 @@ class StudentRegistrationSerializer(StudentSerializer):
 
 class StudentSelfSerializer(StudentSerializer):
     class Meta(StudentSerializer.Meta):
-        fields = ("id", "user", "email", "first_name", "last_name", "grade", "grade_name", "field", "field_name", "school_name", "counselor_user")
+        fields = ("id", "user", "email", "first_name", "last_name", "grade", "grade_name", "field", "field_name", "school_name", "counselor_user") + MOBILE_FIELDS
+        read_only_fields = MOBILE_READONLY
 
     def validate(self, attrs):
         forbidden = {"role", "counselor", "is_active", "is_staff", "is_superuser", "username", "password"} & set(self.initial_data)

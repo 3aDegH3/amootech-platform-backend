@@ -51,6 +51,8 @@ class Quiz24Service:
             if not str(provider_status).isdecimal():
                 provider_status = None
             message = "درخواست ثبت دانش‌آموز در Quiz24 ناموفق بود."
+        if endpoint == "getExamParticipants":
+            message = "دریافت اطلاعات پایش از Quiz24 ناموفق بود."
         message = self._safe_message(message)
         provider_status = self._safe_message(provider_status) if isinstance(provider_status, str) else provider_status
         if not isinstance(provider_status, (str, int)):
@@ -75,14 +77,18 @@ class Quiz24Service:
                 value = value.replace(self.api_key[7:], "[حذف شد]")
         return value
 
-    def _request(self, endpoint, payload=None):
+    def _request(self, endpoint, payload=None, *, timeout=15.0):
         self.config.validate(require_user=endpoint not in ("educationPeriods", "grades", "courses"))
         if endpoint in ("educationPeriods", "grades", "courses"):
             body = {}
         else:
             body = {**(payload or {}), "userId": int(self.user_id)}
+            # Local model identifiers are strings; documented JSON examCode is Integer.
+            code = body.get("examCode")
+            if isinstance(code, str) and code.isascii() and code.isdecimal():
+                body["examCode"] = int(code)
         try:
-            with httpx.Client(timeout=15.0) as client:
+            with httpx.Client(timeout=timeout) as client:
                 response = client.post(
                     self.base_url + endpoint,
                     json=body,
@@ -132,8 +138,10 @@ class Quiz24Service:
     def course_detail(self, grade_id, course_id, consider_used_question=False):
         return self._request("courseDetail", {"gradeId": grade_id, "courseId": course_id, "considerUsedQuestion": consider_used_question})
 
-    def create_exam(self, *, title, grade_external_id, question_type, duration_minutes, has_negative_score):
-        callback = self.config.callback()
+    def create_exam(self, *, title, grade_external_id, question_type, duration_minutes, has_negative_score, callback=None):
+        callback = callback or self.config.callback()
+        if not valid_http_url(callback):
+            raise Quiz24Error(None, "آدرس بازگشت آزمون معتبر نیست.", api_status=400)
         return self._request("createExam", {
             "title": title,
             "callback": callback,
@@ -144,11 +152,25 @@ class Quiz24Service:
             "questionType": question_type,
         })
 
-    def get_exam(self, exam_code):
-        return self._request("exam", {"examCode": exam_code})
+    def edit_existing_exam(self, exam_id, callback):
+        if not str(exam_id).isascii() or not str(exam_id).isdecimal() or int(exam_id) <= 0 or not valid_http_url(callback):
+            raise Quiz24Error(None, "شناسه آزمون یا آدرس بازگشت معتبر نیست.", api_status=400)
+        return self._request("editExam", {"examId": int(exam_id), "callback": callback})
 
-    def get_exam_result(self, user_name, exam_code):
-        return self._request("examResult", {"userName": quiz24_mobile(user_name), "examCode": exam_code})
+    def delete_existing_exam(self, exam_id):
+        if not str(exam_id).isascii() or not str(exam_id).isdecimal() or int(exam_id) <= 0:
+            raise Quiz24Error(None, "شناسه آزمون معتبر نیست.", api_status=400)
+        return self._request("deleteExam", {"examId": int(exam_id)})
+
+    def get_exam(self, exam_code):
+        return self._request("exam", {"examCode": int(exam_code) if str(exam_code).isdecimal() else exam_code})
+
+    def get_exam_participants(self, exam_code, page=1, *, timeout=15.0):
+        # Public contract: /WebService/v1#getExamParticipantsBox.
+        return self._request("getExamParticipants", {"examCode": int(exam_code) if str(exam_code).isdecimal() else exam_code, "page": page}, timeout=timeout)
+
+    def get_exam_result(self, user_name, exam_code, *, timeout=15.0):
+        return self._request("examResult", {"userName": quiz24_mobile(user_name), "examCode": exam_code}, timeout=timeout)
 
     def get_answersheet(self, user_name, exam_code):
         return self._request("answersheets", {"userName": quiz24_mobile(user_name), "examCode": exam_code})

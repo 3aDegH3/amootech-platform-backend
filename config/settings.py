@@ -140,3 +140,6 @@ SPECTACULAR_SETTINGS = {
 STUDENT_OTP_BACKEND = os.getenv("STUDENT_OTP_BACKEND", "").strip()
 STUDENT_OTP_DEV_ENABLED = os.getenv("STUDENT_OTP_DEV_ENABLED", "false").lower() in {"1", "true", "yes"}
 STUDENT_OTP_DEV_OUTBOX = os.getenv("STUDENT_OTP_DEV_OUTBOX", "/tmp/amootech-mobile-otp")
+
+# Explicit opt-in; local trash/archive never calls provider deletion.
+QUIZ24_REMOTE_DELETE_ENABLED = os.getenv("QUIZ24_REMOTE_DELETE_ENABLED", "false").lower() == "true"

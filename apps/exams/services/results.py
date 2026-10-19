@@ -112,7 +112,7 @@ def parse_result(response, question_type):
                         if number is not None:
                             parsed[target] = number
                             break
-            if parsed and not any(key in fields for key in ("courseid", "coursename", "order")):
+            if parsed and not any(key in fields for key in ("courseid", "coursename", "order")) and not isinstance(fields.get("course"), str):
                 candidates.append((parsed, fields))
             for key, entry in fields.items():
                 if not key.startswith(("course", "question", "answer")):
@@ -123,7 +123,9 @@ def parse_result(response, question_type):
     if not candidates and not answers:
         raise Quiz24Error(None, "نتیجه کامل آزمون هنوز در Quiz24 موجود نیست.")
     # Use one summary; never sum or mix per-course scores/ranks.
-    metrics, fields = max(candidates, key=lambda candidate: len(candidate[0])) if candidates else ({}, {})
+    if len(candidates) > 1:
+        raise Quiz24Error(None, "خلاصه کل نتیجه آزمون مبهم است؛ نتیجه قبلی حفظ شد.")
+    metrics, fields = candidates[0] if candidates else ({}, {})
     for target, keys in (("started_at", ("startedat", "startdate")), ("finished_at", ("finishedat", "finishdate"))):
         value = next((fields[key] for key in keys if key in fields), None)
         if isinstance(value, str):
@@ -131,6 +133,6 @@ def parse_result(response, question_type):
                 parsed = parse_datetime(value)
             except ValueError:
                 parsed = None
-            if parsed:
-                metrics[target] = timezone.make_aware(parsed) if timezone.is_naive(parsed) else parsed
+            if parsed and timezone.is_aware(parsed):
+                metrics[target] = parsed
     return metrics, answers

@@ -31,6 +31,28 @@ class ProviderTests(SimpleTestCase):
     def respond(self, data, status=200):
         self.client.post.return_value = httpx.Response(status, json=data, request=httpx.Request("POST", "https://www.quiz24.ir/api/v1/grades"))
 
+    def test_existing_exam_operations_use_documented_endpoint_and_exact_id(self):
+        service = Quiz24Service()
+        service.edit_existing_exam("91", "https://front.example.test/counselor/exams")
+        args, kwargs = self.client.post.call_args
+        self.assertEqual(args[0], CONFIG["QUIZ24_BASE_URL"] + "editExam")
+        self.assertEqual(kwargs["json"], {"userId": 42, "examId": 91, "callback": "https://front.example.test/counselor/exams"})
+        self.assertNotIn("unit-secret-key", str(kwargs["json"]))
+        service.delete_existing_exam("91")
+        self.assertEqual(self.client.post.call_args.args[0], CONFIG["QUIZ24_BASE_URL"] + "deleteExam")
+        self.assertEqual(self.client.post.call_args.kwargs["json"], {"userId": 42, "examId": 91})
+
+    def test_numeric_exam_codes_are_json_integers_for_documented_endpoints(self):
+        self.respond({"status": 100, "result": "https://www.quiz24.ir/run/exam"})
+        service = Quiz24Service()
+        for method in (service.get_exam_result, service.get_answersheet, service.get_participation_url):
+            method("09123456789", "3193168")
+            body = self.client.post.call_args.kwargs["json"]
+            self.assertEqual(body["examCode"], 3193168)
+            self.assertIs(type(body["examCode"]), int)
+            self.assertEqual(body["userId"], 42)
+            self.assertEqual(body["userName"], "09123456789")
+
     def test_success_codes(self):
         for code in (100, "100"):
             with self.subTest(code=code):

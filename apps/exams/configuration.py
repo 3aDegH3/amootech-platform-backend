@@ -1,4 +1,4 @@
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 import re
 
 from django.conf import settings
@@ -45,6 +45,15 @@ class Quiz24Config:
             raise Quiz24Error(None, "آدرس بازگشت آزمون در تنظیمات سامانه معتبر نیست.", api_status=400)
         return url
 
+    def manual_callback(self, exam_id, edit_session=None):
+        parts = urlsplit(self.callback())
+        query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "manual_exam"]
+        query = [(k, v) for k, v in query if k != "edit_session"]
+        query.append(("manual_exam", str(exam_id)))
+        if edit_session:
+            query.append(("edit_session", str(edit_session)))
+        return urlunsplit(parts._replace(query=urlencode(query)))
+
     def public_status(self):
         def valid(operation):
             try:
@@ -59,4 +68,9 @@ class Quiz24Config:
             "counselor_callback_configured": valid(lambda: self.callback()),
             "student_callback_configured": valid(lambda: self.callback(student=True)),
         }
-        return {"configured": all(flags.values()), **flags}
+        result = {"configured": all(flags.values()), **flags}
+        if flags["counselor_callback_configured"]:
+            parts = urlsplit(self.callback())
+            result["counselor_callback_origin"] = urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+            result["counselor_callback_path"] = parts.path
+        return result

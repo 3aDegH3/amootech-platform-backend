@@ -58,21 +58,60 @@ class EducationPeriodsView(Quiz24ProviderView):
         return self.provider_response("education_periods")
 
 
+def scoped_provider_response(view, method):
+    from apps.academics.provider_catalog import catalog, rows, field, allowed_grades, authorize_provider, valid_provider_id
+    try:
+        if view.request.user.role == User.Role.STUDENT:
+            allowed = allowed_grades(view.request.user)
+        response = catalog(method)
+        if view.request.user.role == User.Role.STUDENT:
+            selected = []
+            for row in rows(response):
+                if not valid_provider_id(field(row, ('gradeid' if method == 'grades' else 'courseid'), 'id', 'key')):
+                    continue
+                if method == 'grades':
+                    if str(field(row, 'gradeid', 'id', 'key')) in allowed:
+                        selected.append(row)
+                else:
+                    if str(field(row, 'gradeid')) not in allowed:
+                        continue
+                    from rest_framework.exceptions import PermissionDenied
+                    try:
+                        authorize_provider(view.request.user, grade_id=field(row, 'gradeid'), course_id=field(row, 'courseid', 'id', 'key'))
+                    except PermissionDenied:
+                        continue
+                    selected.append(row)
+            envelope_key = next((key for key in response if key.replace('_', '').lower() in ('result', 'data')), 'result')
+            response = {**response, envelope_key: selected}
+        return Response(response)
+    except Quiz24Error as error:
+        return Response(quiz24_error_data(error), status=error.api_status)
+
+
 class GradesView(StudentBuilderProviderView):
     def get(self, request):
-        return self.provider_response("grades")
+        return scoped_provider_response(self, "grades")
 
 
 class CoursesView(StudentBuilderProviderView):
     def get(self, request):
-        return self.provider_response("courses")
+        return scoped_provider_response(self, "courses")
 
 
 class CourseDetailView(StudentBuilderProviderView):
     def post(self, request):
         serializer = CourseDetailSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        return self.provider_response("course_detail", **serializer.validated_data)
+        from apps.academics.provider_catalog import authorize_provider, catalog
+        try:
+            authorize_provider(request.user, serializer.validated_data['grade_id'], serializer.validated_data['course_id'])
+            result = catalog('course_detail', **serializer.validated_data)
+            if request.user.role == User.Role.STUDENT:
+                from .services.catalog import taxonomy_index
+                taxonomy_index(result, serializer.validated_data['course_id'], serializer.validated_data['grade_id'])
+            return Response(result)
+        except Quiz24Error as error:
+            return Response(quiz24_error_data(error), status=error.api_status)
 
 
 class QuestionCountView(StudentBuilderProviderView):
@@ -80,6 +119,8 @@ class QuestionCountView(StudentBuilderProviderView):
         serializer = QuestionCountSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
+            from .services.catalog import validate_student_selection
+            validate_student_selection(request.user, serializer.validated_data)
             counts = normalize_inventory(Quiz24Service().question_count(**serializer.validated_data))
         except Quiz24Error as error:
             return Response(
@@ -297,12 +338,36 @@ class ExamViewSet(mixins.ListModelMixin, mixins.CreateModelMixin, mixins.Retriev
         if receipt and receipt.payload_digest != digest:
             return Response({"detail": "شناسه درخواست قبلاً برای تنظیمات دیگری استفاده شده است."}, status=409)
         if receipt and receipt.exam_id:
+            from apps.academics.provider_catalog import authorize_provider
+            try:
+                authorize_provider(request.user, filters['grade_id'], filters['course_id'])
+            except Quiz24Error as error:
+                return Response(quiz24_error_data(error), status=error.api_status)
             return Response(self.get_serializer(receipt.exam).data, status=200)
         if receipt and receipt.state == "FAILED":
             return Response(receipt.response, status=receipt.error_status)
         service = Quiz24Service()
+        report_scope = {}
+        def validate_report_context():
+            if 'report_context' not in data:
+                return {}
+            if request.user.role != User.Role.STUDENT:
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied('این مسیر فقط برای دانش‌آموز است.')
+            from .services.report_topics import confirmed_report_scope
+            scope = confirmed_report_scope(request.user, data['report_context'])
+            if any(filters.get(k) != v for k, v in scope['provider_filters'].items()):
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError({'report_context': 'فیلتر آزمون با مباحث تأییدشده گزارش سازگار نیست.'})
+            # Preserve the existing verified Quiz24 identity requirements before mutation.
+            from .services.quiz24 import student_quiz24_mobile
+            student_quiz24_mobile(data['student'])
+            return scope
         if receipt is None or receipt.state == "PENDING":
             try:
+                from .services.catalog import validate_student_selection
+                report_scope = validate_report_context()
+                validate_student_selection(request.user, filters)
                 inventory = normalize_inventory(service.question_count(**filters))
             except Quiz24Error as error:
                 return Response(quiz24_error_data(Quiz24Error(error.status, automatic_error_message(error))), status=error.api_status)
@@ -313,7 +378,14 @@ class ExamViewSet(mixins.ListModelMixin, mixins.CreateModelMixin, mixins.Retriev
                     errors[field] = f"تعداد درخواستی بیشتر از موجودی ({inventory[difficulty]}) است."
             if errors:
                 return Response(errors, status=400)
-            receipt, _ = ExamCreation.objects.get_or_create(key=key, defaults={"payload_digest": digest})
+            # Recheck the authenticated profile after the availability request,
+            # immediately before claiming permission to send createOnlineExam.
+            try:
+                report_scope = validate_report_context()
+                validate_student_selection(request.user, filters)
+            except Quiz24Error as error:
+                return Response(quiz24_error_data(error), status=error.api_status)
+            receipt, _ = ExamCreation.objects.get_or_create(key=key, defaults={"payload_digest": digest, "confirmed_scope": report_scope})
             if receipt.payload_digest != digest:
                 return Response({"detail": "شناسه درخواست قبلاً استفاده شده است."}, status=409)
             if ExamCreation.objects.filter(pk=receipt.pk, state="PENDING").update(state="SENDING"):
@@ -350,6 +422,7 @@ class ExamViewSet(mixins.ListModelMixin, mixins.CreateModelMixin, mixins.Retriev
                     grade_external_id=data["grade_external_id"], question_type=data["question_type"],
                     duration_minutes=data["duration_minutes"], has_negative_score=data["has_negative_score"],
                     provider_exam_code=provider.validated_data["examCode"],
+                    provider_exam_id=provider.validated_data.get("examId"),
                     status=Exam.Status.PUBLISHED if request.user.role == User.Role.STUDENT else Exam.Status.READY,
                     is_personal_practice=request.user.role == User.Role.STUDENT,
                     question_count=sum(data[field] for field in ("easy_count", "medium_count", "hard_count", "very_hard_count")),

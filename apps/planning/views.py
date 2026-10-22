@@ -517,6 +517,7 @@ def copy_item(source, target_day):
         planned_duration_minutes=source.planned_duration_minutes, start_time=source.start_time,
         end_time=source.end_time, note=source.note, subject=source.subject, chapter=source.chapter,
         topic=source.topic, test_count=source.test_count,
+        taxonomy=source.taxonomy, title_is_custom=source.title_is_custom,
     )
 
 

@@ -102,6 +102,7 @@ class StudentExamSerializer(SchedulePresentationMixin, serializers.ModelSerializ
         return data
 
     result_available = serializers.BooleanField(read_only=True, default=False)
+    report_scope = serializers.JSONField(source="creation.confirmed_scope", read_only=True, default=dict)
     counselor_name = serializers.SerializerMethodField()
 
     def get_counselor_name(self, obj):
@@ -109,7 +110,7 @@ class StudentExamSerializer(SchedulePresentationMixin, serializers.ModelSerializ
 
     class Meta:
         model = Exam
-        fields = ("id", "archived_at", "trashed_at", *SCHEDULE_FIELDS, "availability", "title", "question_count", "question_type", "duration_minutes", "status", "created_at", "counselor_name", "result_available", "is_personal_practice")
+        fields = ("id", "report_scope", "archived_at", "trashed_at", *SCHEDULE_FIELDS, "availability", "title", "question_count", "question_type", "duration_minutes", "status", "created_at", "counselor_name", "result_available", "is_personal_practice")
         read_only_fields = fields
 
 
@@ -173,6 +174,9 @@ class QuestionCountSerializer(AutomaticFiltersMixin, serializers.Serializer):
 
 
 class AutomaticExamSerializer(AutomaticFiltersMixin, CreateExamSerializer):
+    from .services.report_topics import ReportScopeInput
+    report_context = ReportScopeInput(required=False, write_only=True)
+
     creation_key = serializers.UUIDField(required=False, write_only=True)
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -206,6 +210,7 @@ class AutomaticExamSerializer(AutomaticFiltersMixin, CreateExamSerializer):
 
 
 class AutomaticCreatedExamSerializer(serializers.Serializer):
+    examId = serializers.CharField(max_length=100, allow_null=True, required=False)
     examCode = serializers.CharField(max_length=100)
 
     @classmethod
@@ -220,7 +225,7 @@ class AutomaticCreatedExamSerializer(serializers.Serializer):
             code = result.get("examCode") if isinstance(result, dict) else result
         if type(code) not in (str, int) or isinstance(code, int) and code <= 0:
             code = None
-        return cls(data={"examCode": code})
+        return cls(data={"examCode": code, "examId": result.get("examId") if isinstance(result, dict) else response.get("examId")})
 
 
 class CreatedQuiz24ExamSerializer(serializers.Serializer):

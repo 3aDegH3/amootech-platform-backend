@@ -282,6 +282,10 @@ class DailyReportViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
     def planned(self, request, pk=None, item_id=None):
         report = self.get_object()
         self.student_write(report)
+        item_id = serializers.IntegerField(min_value=1).run_validation(item_id)
+        # Match the owner -> report -> item lock order used by opening/closing a day.
+        StudentProfile.objects.select_for_update().get(pk=report.student_id)
+        DailyReport.objects.select_for_update().get(pk=report.pk)
         plan_item = PlanItem.objects.filter(
             pk=item_id, plan_day__date=report.date, plan_day__plan__student=report.student,
             plan_day__plan__status="PUBLISHED",
@@ -290,6 +294,8 @@ class DailyReportViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
             raise serializers.ValidationError({"plan_item": "This item is not in this published daily plan."})
         payload = ReportItemInputSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
+        if "reported_status" in payload.validated_data and "completion_status" in payload.validated_data:
+            raise serializers.ValidationError({"reported_status": "Send one completion declaration per request."})
         row, _ = DailyReportItem.objects.select_for_update().get_or_create(report=report, plan_item=plan_item)
         completion_status = payload.validated_data.pop("completion_status", None)
         self._save_item(row, payload.validated_data)
@@ -297,7 +303,7 @@ class DailyReportViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
         # A running/paused timer keeps its own execution state and duration.
         if completion_status:
             transition(request.user, plan_item.pk, "quick_complete" if completion_status == "COMPLETED" else "set_partial")
-        elif plan_item.kind != PlanItem.Kind.EVENT and (
+        elif "reported_status" not in payload.validated_data and plan_item.kind != PlanItem.Kind.EVENT and (
             not hasattr(plan_item, "execution") or plan_item.execution.status == PlanItemExecution.Status.NOT_DONE
         ) and any(
             (payload.validated_data.get(field) or 0) > 0 for field in ("actual_duration_minutes", "actual_test_count")

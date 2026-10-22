@@ -2,6 +2,8 @@ from unittest.mock import patch
 
 from rest_framework.test import APITestCase
 
+from django.core.cache import cache
+from apps.academics.models import Grade
 from apps.accounts.models import CounselorProfile, StudentProfile, User
 from apps.exams.exceptions import Quiz24Error
 from apps.exams.models import Exam, ExamAttempt
@@ -10,7 +12,11 @@ from apps.exams.models import Exam, ExamAttempt
 class StudentPracticeTests(APITestCase):
     def setUp(self):
         self.user = User.objects.create_user(username="practice-student", role=User.Role.STUDENT)
-        self.student = StudentProfile.objects.create(user=self.user)
+        cache.clear()
+        grade = Grade.objects.create(name="هفتم", number=7)
+        self.student = StudentProfile.objects.create(user=self.user, grade=grade)
+        patch("apps.exams.views.Quiz24Service.grades", return_value={"result":[{"id":1,"name":"هفتم"}]}).start()
+        patch("apps.exams.views.Quiz24Service.courses", return_value={"result":[{"id":2,"name":"علوم","gradeId":1}]}).start()
         self.other_user = User.objects.create_user(username="other-student", role=User.Role.STUDENT)
         self.other = StudentProfile.objects.create(user=self.other_user)
         self.client.force_authenticate(self.user)
@@ -78,9 +84,9 @@ class StudentPracticeTests(APITestCase):
 
     def test_taxonomy_access_is_limited_to_builder_endpoints(self):
         for path, method, payload, provider_method, response in (
-            ("grades", "get", None, "grades", {"result": []}),
-            ("courses", "get", None, "courses", {"result": []}),
-            ("course-detail", "post", {"grade_id": 1, "course_id": 2}, "course_detail", {"result": {}}),
+            ("grades", "get", None, "grades", {"result": [{"id":1,"name":"هفتم"}]}),
+            ("courses", "get", None, "courses", {"result": [{"id":2,"name":"علوم","gradeId":1}]}),
+            ("course-detail", "post", {"grade_id": 1, "course_id": 2}, "course_detail", {"result": []}),
         ):
             with patch(f"apps.exams.views.Quiz24Service.{provider_method}", return_value=response):
                 self.assertEqual(getattr(self.client, method)(f"/api/v1/exams/provider/{path}/", payload, format="json").status_code, 200)

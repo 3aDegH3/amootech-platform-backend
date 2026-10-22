@@ -1,6 +1,8 @@
 from unittest.mock import patch
 from uuid import uuid4
 
+from django.core.cache import cache
+from apps.academics.models import Grade
 from django.db import IntegrityError
 from django.test import SimpleTestCase, override_settings
 from rest_framework.test import APITestCase
@@ -36,7 +38,12 @@ class AutomaticCreationTests(APITestCase):
         self.counselor_user = User.objects.create_user(username="builder-counselor", role=User.Role.COUNSELOR)
         self.counselor = CounselorProfile.objects.create(user=self.counselor_user)
         self.student_user = User.objects.create_user(username="builder-student", role=User.Role.STUDENT)
-        self.student = StudentProfile.objects.create(user=self.student_user, counselor=self.counselor)
+        cache.clear()
+        grade = Grade.objects.create(name="هفتم", number=7)
+        self.student = StudentProfile.objects.create(user=self.student_user, counselor=self.counselor, grade=grade)
+        patch("apps.exams.views.Quiz24Service.grades", return_value={"result":[{"id":10,"name":"هفتم"}]}).start()
+        patch("apps.exams.views.Quiz24Service.courses", return_value={"result":[{"id":4932,"name":"درس","gradeId":10}]}).start()
+        patch("apps.exams.views.Quiz24Service.course_detail", return_value={"result":[{"key":4932,"type":1,"title":"درس","children":[{"key":4510,"type":2,"title":"فصل","children":[{"key":9061,"type":3,"title":"مبحث","children":[{"key":999,"type":4,"title":"موضوع","children":[]}]}]}]}]}).start()
         self.client.force_authenticate(self.counselor_user)
         self.payload = dict(student=self.student.pk, title="آزمون", grade_external_id=10, course_id=4932, question_type=1, duration_minutes=5, easy_count=1, chapter_ids=[4510], subject_ids=[9061], object_ids=[999], creation_key=str(uuid4()))
         self.counts = patch("apps.exams.views.Quiz24Service.question_count", return_value={"result": {"easyCount": 8, "mediumCount": 287, "hardCount": 82, "veryHardCount": 0}}).start()
@@ -121,8 +128,11 @@ class AutomaticCreationTests(APITestCase):
 
     def test_course_detail_preserves_provider_tree_and_external_ids_for_both_roles(self):
         tree = {"status": 100, "result": [{"key": 4932, "title": "درس", "type": 1, "parentId": None, "children": [{"key": 4510, "title": "فصل", "type": 2, "parentId": 4932, "children": [{"key": 9061, "title": "مبحث", "type": 3, "parentId": 4510, "children": []}]}]}]}
+        from django.core.cache import cache
+        cache.clear()
         for user in (self.counselor_user, self.student_user):
             self.client.force_authenticate(user)
+            cache.clear()
             with patch("apps.exams.views.Quiz24Service.course_detail", return_value=tree) as detail:
                 response = self.client.post("/api/v1/exams/provider/course-detail/", {"grade_id": 10, "course_id": 4932}, format="json")
                 self.assertEqual(response.status_code, 200)

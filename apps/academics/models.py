@@ -1,7 +1,9 @@
 from django.db import models
+from django.core.validators import MinValueValidator, MaxValueValidator
 
 
 class Grade(models.Model):
+    number = models.PositiveSmallIntegerField(null=True, blank=True, unique=True, validators=[MinValueValidator(1), MaxValueValidator(12)])
     name = models.CharField(max_length=100, unique=True)
     ordering = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)

@@ -5,7 +5,7 @@ from .models import Grade, Field, Subject, Chapter, Topic
 class GradeSerializer(serializers.ModelSerializer):
     class Meta:
         model = Grade
-        fields = ("id", "name", "ordering", "is_active")
+        fields = ("id", "name", "number", "ordering", "is_active")
 
 
 class FieldSerializer(serializers.ModelSerializer):

@@ -116,6 +116,7 @@ class ExamCreation(models.Model):
 
     key = models.CharField(max_length=64, unique=True)
     payload_digest = models.CharField(max_length=64)
+    confirmed_scope = models.JSONField(default=dict, blank=True, editable=False)
     state = models.CharField(max_length=16, default="PENDING")
     response = models.JSONField(null=True)
     error_status = models.PositiveIntegerField(null=True)

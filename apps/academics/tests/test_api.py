@@ -1,6 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from rest_framework.test import APITestCase
+from apps.accounts.models import StudentProfile
 from apps.academics.models import Grade, Field, Subject, Chapter, Topic
 
 User = get_user_model()
@@ -29,6 +30,10 @@ class AcademicAPITests(APITestCase):
             if parent is not None:
                 self.assertEqual(self.client.get(url, {parent_key: parent.pk}).data["count"], 1)
                 self.assertEqual(self.client.get(url, {parent_key: "bad"}).status_code, 400)
+            if plural == "grades":
+                obj.number = 7
+                obj.save()
+                StudentProfile.objects.create(user=self.student, grade=obj)
             for user in (self.counselor, self.student):
                 self.client.force_authenticate(user)
                 self.assertEqual(self.client.get(url).status_code, 200)

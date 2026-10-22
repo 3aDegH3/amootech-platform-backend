@@ -64,16 +64,17 @@ def student_progress(student, days=7, include_items=False, start_date=None, end_
             summary["planned_minutes"] += item.planned_duration_minutes or 0
         summary["planned_tests"] += item.test_count or 0
         execution = executions.get(item.pk)
+        row = report_row_by_plan.get(item.pk)
+        state = (row.reported_status if row else None) or (execution.status if execution else "NOT_STARTED")
         if item.kind in ACADEMIC_KINDS:
-            if execution and execution.status == PlanItemExecution.Status.COMPLETED:
+            if state == PlanItemExecution.Status.COMPLETED:
                 summary["completed"] += 1
-            elif execution and execution.status == PlanItemExecution.Status.PARTIAL:
+            elif state == PlanItemExecution.Status.PARTIAL:
                 summary["partial"] += 1
-            elif execution and execution.status == PlanItemExecution.Status.NOT_DONE:
+            elif state == PlanItemExecution.Status.NOT_DONE:
                 summary["not_done"] += 1
             else:
                 summary["remaining"] += 1
-        row = report_row_by_plan.get(item.pk)
         if row and row.duration_source == DailyReportItem.DurationSource.MANUAL:
             minutes = row.actual_duration_minutes
         elif execution and execution.started_at:
@@ -103,8 +104,8 @@ def student_progress(student, days=7, include_items=False, start_date=None, end_
                 bucket["wrong_entries"] += int(row is not None and row.wrong_count is not None)
                 block = {"id": item.pk, "title": item.topic.name if item.topic else item.chapter.name if item.chapter else item.title or item.subject.name,
                          "planned_minutes": item.planned_duration_minutes, "actual_minutes": minutes,
-                         "status": execution.status if execution else "NOT_STARTED"}
-                if execution and execution.status == "COMPLETED":
+                         "status": state}
+                if state == "COMPLETED":
                     bucket["completed"] += 1
                     bucket["completed_items"].append(block)
                 else:
@@ -120,7 +121,7 @@ def student_progress(student, days=7, include_items=False, start_date=None, end_
                 "planned_minutes": item.planned_duration_minutes,
                 "actual_minutes": minutes,
                 "planned_tests": item.test_count, "actual_tests": row.actual_test_count if row else None,
-                "status": execution.status if execution else "NOT_STARTED",
+                "status": state,
                 "source": execution.source if execution else None,
                 "report_item_source": row.source if row else None,
                 "correct": details[0], "wrong": details[1], "unanswered": details[2],

@@ -112,7 +112,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         counts = {"grades": 0, "fields": 0, "subjects": 0, "chapters": 0, "topics": 0}
         for year, grade_name in GRADES.items():
-            grade, created = Grade.objects.get_or_create(name=grade_name, defaults={"ordering": year})
+            grade, created = Grade.objects.get_or_create(name=grade_name, defaults={"ordering": year, "number": year})
             counts["grades"] += created
             for field_order, (field_name, by_year) in enumerate(SPECIALIZED.items(), 1):
                 field, created = Field.objects.get_or_create(grade=grade, name=field_name, defaults={"ordering": field_order})

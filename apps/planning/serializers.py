@@ -52,14 +52,30 @@ class PlanItemSerializer(serializers.ModelSerializer):
     subject_name = serializers.CharField(source="subject.name", read_only=True)
     chapter_name = serializers.CharField(source="chapter.name", read_only=True)
     topic_name = serializers.CharField(source="topic.name", read_only=True)
+    reset_generated_title = serializers.BooleanField(write_only=True, required=False, default=False)
+    generated_title = serializers.SerializerMethodField()
     counselor_editable = serializers.SerializerMethodField()
     edit_lock_reason = serializers.SerializerMethodField()
 
     class Meta:
         model = PlanItem
-        fields = ("id", "plan_day", "kind", "ordering", "title", "planned_duration_minutes", "start_time", "end_time", "note", "subject", "subject_name", "chapter", "chapter_name", "topic", "topic_name", "test_count", "fixed_source_type", "fixed_source_id", "counselor_editable", "edit_lock_reason")
+        fields = ("id", "taxonomy", "title_is_custom", "generated_title", "reset_generated_title", "plan_day", "kind", "ordering", "title", "planned_duration_minutes", "start_time", "end_time", "note", "subject", "subject_name", "chapter", "chapter_name", "topic", "topic_name", "test_count", "fixed_source_type", "fixed_source_id", "counselor_editable", "edit_lock_reason")
 
-        read_only_fields = ("fixed_source_type", "fixed_source_id")
+        read_only_fields = ("fixed_source_type", "fixed_source_id", "title_is_custom")
+
+    def get_generated_title(self, obj):
+        from .titles import build_title
+        return build_title(self.selection(obj))
+
+    @staticmethod
+    def selection(obj):
+        if obj.taxonomy:
+            return obj.taxonomy
+        topic, chapter, subject = obj.topic, obj.chapter, obj.subject
+        chapter = chapter or (topic.chapter if topic else None)
+        subject = subject or (chapter.subject if chapter else None)
+        return {'labels': {k: v.name for k, v in
+                (('course', subject), ('chapter', chapter), ('topic', topic)) if v}}
 
     def get_counselor_editable(self, obj):
         # Date no longer determines editability; only student data locks the item.
@@ -82,6 +98,40 @@ class PlanItemSerializer(serializers.ModelSerializer):
         enforce_editable_day(day)
         if self.instance and item_has_student_data(self.instance):
             raise serializers.ValidationError("این باکس توسط دانش‌آموز شروع یا ثبت شده و دیگر قابل ویرایش کامل نیست.")
+        from copy import copy
+        from apps.academics.provider_catalog import resolve_selection
+        from apps.exams.exceptions import Quiz24Error
+        from .titles import build_title
+        reset = attrs.pop('reset_generated_title', False)
+        if reset and 'title' in attrs:
+            raise serializers.ValidationError({'title': 'Reset and custom title cannot be supplied together.'})
+        if 'taxonomy' in attrs:
+            try:
+                attrs['taxonomy'] = resolve_selection(attrs['taxonomy'])
+            except Quiz24Error as error:
+                raise serializers.ValidationError({'taxonomy': 'فهرست آموزشی موقتاً در دسترس نیست.'}) from error
+        candidate = copy(self.instance) if self.instance else PlanItem()
+        for key, value in attrs.items():
+            setattr(candidate, key, value)
+        if candidate.taxonomy and any((candidate.subject_id, candidate.chapter_id, candidate.topic_id)):
+            raise serializers.ValidationError({'taxonomy': 'Internal and Quiz24 selections cannot be mixed.'})
+        selection_changed = self.instance is None or bool(
+            {'taxonomy', 'subject', 'chapter', 'topic', 'kind', 'plan_day'} & set(attrs))
+        if candidate.kind != PlanItem.Kind.EVENT and selection_changed:
+            if (not isinstance(candidate.taxonomy, dict)
+                    or any(k not in candidate.taxonomy for k in ('grade', 'course', 'chapter'))):
+                raise serializers.ValidationError({'taxonomy': 'Grade, course and chapter from Quiz24 are required.'})
+            from apps.academics.provider_catalog import authorize_provider
+            authorize_provider(day.plan.student.user, candidate.taxonomy['grade'], candidate.taxonomy['course'])
+        generated = build_title(self.selection(candidate))
+        custom = bool(attrs.get('title', '').strip()) if 'title' in attrs else (self.instance.title_is_custom if self.instance else False)
+        if reset:
+            custom = False
+        if not custom:
+            if not generated:
+                raise serializers.ValidationError({'title': 'A title or structured selection is required.'})
+            attrs['title'] = generated
+        attrs['title_is_custom'] = custom
         return validate_model(self, attrs)
 
 

@@ -84,6 +84,8 @@ class PlanItem(models.Model):
     plan_day = models.ForeignKey(PlanDay, on_delete=models.CASCADE, related_name="items")
     kind = models.CharField(max_length=8, choices=Kind.choices)
     ordering = models.PositiveIntegerField(default=0)
+    taxonomy = models.JSONField(default=dict, blank=True)
+    title_is_custom = models.BooleanField(default=True)
     title = models.CharField(max_length=200, blank=True)
     planned_duration_minutes = models.PositiveIntegerField(null=True, blank=True)
     start_time = models.TimeField(null=True, blank=True)
@@ -107,8 +109,6 @@ class PlanItem(models.Model):
         errors = {}
         if self.kind != self.Kind.EVENT and not self.planned_duration_minutes:
             errors["planned_duration_minutes"] = "Duration is required for this item type."
-        if self.kind in (self.Kind.STUDY, self.Kind.TEST, self.Kind.REVIEW) and not self.subject_id:
-            errors["subject"] = "Subject is required for this item type."
         if self.kind in (self.Kind.EXAM, self.Kind.EVENT) and not self.title.strip():
             errors["title"] = "Title is required for this item type."
         if self.kind == self.Kind.TEST and not self.test_count:

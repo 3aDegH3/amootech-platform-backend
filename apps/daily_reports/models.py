@@ -58,6 +58,15 @@ class DailyReport(models.Model):
 
 
 class DailyReportItem(models.Model):
+    class ReportedStatus(models.TextChoices):
+        COMPLETED = "COMPLETED", "Completed"
+        PARTIAL = "PARTIAL", "Partial"
+        NOT_DONE = "NOT_DONE", "Not done"
+
+    # Explicit student declaration, independent of execution/timer and actual measurements.
+    # NULL means UNSET, including historical rows; no inferred data migration.
+    reported_status = models.CharField(max_length=12, choices=ReportedStatus.choices, null=True, blank=True)
+
     source = models.CharField(max_length=8, choices=MutationSource.choices, default=MutationSource.WEB)
 
     class DurationSource(models.TextChoices):

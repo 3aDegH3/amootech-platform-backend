@@ -27,7 +27,7 @@ def check_editable(date):
 def open_report(user, date):
     student = StudentProfile.objects.select_for_update().get(user=user)
     report = DailyReport.objects.filter(student=student, date=date).first()
-    if report and date != report_today():
+    if report and date < report_today() - timedelta(days=30):
         return report
     check_editable(date)
     report, _ = DailyReport.objects.get_or_create(student=student, date=date)
@@ -78,7 +78,8 @@ def report_payload(report):
         else:
             actual_duration = None
             duration_source = None
-        state = execution.status if execution else ("NOT_STARTED" if planned else "UNPLANNED")
+        execution_state = execution.status if execution else ("NOT_STARTED" if planned else "UNPLANNED")
+        state = row.reported_status or execution_state
         if planned and kind in ACADEMIC_KINDS:
             planned_total += 1
             planned_minutes += planned.planned_duration_minutes or 0
@@ -115,7 +116,8 @@ def report_payload(report):
             "actual_test_count": row.actual_test_count,
             "correct_count": row.correct_count, "wrong_count": row.wrong_count,
             "unanswered_count": row.unanswered_count,
-            "execution_status": state,
+            "execution_status": execution_state, "reported_status": row.reported_status,
+            "taxonomy": planned.taxonomy if planned else {},
         })
     return {
         "id": report.pk, "source": report.source, "student": report.student_id, "date": report.date.isoformat(),
@@ -123,6 +125,11 @@ def report_payload(report):
         "sleep_time": report.sleep_time.isoformat(timespec="minutes") if report.sleep_time else None,
         "mobile_minutes": report.mobile_minutes, "self_rating": report.self_rating,
         "note": report.note, "closed_at": report.closed_at.isoformat() if report.closed_at else None, "items": items,
+        "editable": report_today() - timedelta(days=30) <= report.date <= report_today(),
+        "reporting_progress": {
+            "reported": sum(row.plan_item_id is not None and row.reported_status is not None for row in rows),
+            "total": sum(row.plan_item_id is not None for row in rows),
+        },
         "summary": {
             "planned_minutes": planned_minutes, "total_actual_minutes": total_minutes,
             "planned_tests": planned_tests, "total_tests": total_tests,
@@ -144,6 +151,7 @@ def close_day_review(student, date):
     executions = {row.plan_item_id: row for row in PlanItemExecution.objects.filter(
         student=student, plan_item_id__in=[item.pk for item in items],
     )}
+    declarations = dict(DailyReportItem.objects.filter(report__student=student, report__date=date, plan_item__isnull=False).values_list("plan_item_id", "reported_status"))
     unresolved = []
     active_timer = PlanItemExecution.objects.filter(
         student=student, plan_item_id__in=[item.pk for item in items],
@@ -155,7 +163,7 @@ def close_day_review(student, date):
         if item.kind == PlanItem.Kind.EVENT:
             continue
         execution = executions.get(item.pk)
-        state = execution.status if execution else "NOT_STARTED"
+        state = declarations.get(item.pk) or (execution.status if execution else "NOT_STARTED")
         if state not in (PlanItemExecution.Status.COMPLETED, PlanItemExecution.Status.PARTIAL, PlanItemExecution.Status.NOT_DONE):
             unresolved.append({
                 "id": item.pk, "kind": item.kind,

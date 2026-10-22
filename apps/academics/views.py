@@ -6,6 +6,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.views import APIView
 from apps.accounts.models import User
 from .models import Grade, Field, Subject, Chapter, Topic
+from .policy import scope_catalog
 from .serializers import GradeSerializer, FieldSerializer, SubjectSerializer, ChapterSerializer, TopicSerializer
 
 
@@ -33,7 +34,7 @@ class AcademicViewSet(viewsets.ModelViewSet):
             if not raw.isdecimal() or int(raw) < 1:
                 raise ValidationError({self.filter_field: "Must be a positive integer."})
             queryset = queryset.filter(**{self.filter_field + "_id": int(raw)})
-        return queryset
+        return scope_catalog(queryset, self.request.user)
 
 
 class GradeViewSet(AcademicViewSet):
@@ -94,18 +95,29 @@ class AcademicTreeView(APIView):
         field_id = request.query_params.get("field")
         student_id = request.query_params.get("student")
         # Resolve grade/field from student if given
+        if student_id and not student_id.isdecimal():
+            raise ValidationError({"student": "Must be a positive integer."})
         if student_id and student_id.isdecimal():
             try:
                 sp = StudentProfile.objects.select_related("grade", "field").get(pk=int(student_id))
+                if request.user.role == User.Role.STUDENT and sp.user_id != request.user.pk:
+                    from rest_framework.exceptions import PermissionDenied
+                    raise PermissionDenied('Student is not available to you.')
+                if request.user.role == User.Role.COUNSELOR and sp.counselor_id != getattr(getattr(request.user, 'counselor_profile', None), 'pk', None):
+                    from rest_framework.exceptions import PermissionDenied
+                    raise PermissionDenied('Student is not assigned to you.')
                 if sp.grade_id:
                     grade_id = str(sp.grade_id)
                 if sp.field_id:
                     field_id = str(sp.field_id)
             except StudentProfile.DoesNotExist:
-                pass
+                raise ValidationError({"student": "Student does not exist."})
         subjects = Subject.objects.select_related("field").filter(is_active=True)
         chapters = Chapter.objects.select_related("subject").filter(is_active=True)
         topics = Topic.objects.select_related("chapter").filter(is_active=True)
+        subjects = scope_catalog(subjects, request.user)
+        chapters = scope_catalog(chapters, request.user)
+        topics = scope_catalog(topics, request.user)
         if field_id and field_id.isdecimal():
             subjects = subjects.filter(field_id=int(field_id))
             chapters = chapters.filter(subject__field_id=int(field_id))

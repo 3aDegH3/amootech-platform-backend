@@ -27,6 +27,7 @@ class DailyFieldsSerializer(serializers.ModelSerializer):
 
 
 class ReportItemInputSerializer(serializers.Serializer):
+    reported_status = serializers.ChoiceField(choices=DailyReportItem.ReportedStatus.choices, required=False)
     completion_status = serializers.ChoiceField(choices=("COMPLETED", "PARTIAL"), required=False)
     note = serializers.CharField(max_length=500, allow_blank=True, required=False)
     actual_duration_minutes = serializers.IntegerField(min_value=0, allow_null=True, required=False)
@@ -38,6 +39,7 @@ class ReportItemInputSerializer(serializers.Serializer):
 
 
 class UnplannedItemInputSerializer(ReportItemInputSerializer):
+    reported_status = None
     completion_status = None
     kind = serializers.ChoiceField(choices=PlanItem.Kind.choices)
     title = serializers.CharField(max_length=200, allow_blank=True, required=False)

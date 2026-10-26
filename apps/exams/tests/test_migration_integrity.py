@@ -9,7 +9,7 @@ from apps.exams.models import Exam, ExamAttempt, ExamAssignment, ExamMonitoring,
 
 class MigrationIntegrityTests(TransactionTestCase):
     def test_incremental_sprints_preserve_observations_results_and_audit(self):
-        final = [("exams", "0010_examattempt_participation_lease_until_and_more")]
+        final = MigrationExecutor(connection).loader.graph.leaf_nodes()
         def migrate(target):
             executor = MigrationExecutor(connection)
             executor.migrate([("exams", target)])

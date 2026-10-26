@@ -23,7 +23,8 @@ class AutomaticResponseTests(SimpleTestCase):
         ):
             serializer = AutomaticCreatedExamSerializer.from_provider(response)
             self.assertTrue(serializer.is_valid(), serializer.errors)
-            self.assertEqual(serializer.validated_data, {"examCode": "3193168"})
+            self.assertEqual(serializer.validated_data["examCode"], "3193168")
+            self.assertIsNone(serializer.validated_data.get("examId"))
 
     def test_invalid_and_rejected_responses_do_not_become_codes(self):
         for result in (None, True, False, 0, -1, 1.5, {}, [], ""):
@@ -35,12 +36,16 @@ class AutomaticResponseTests(SimpleTestCase):
 @override_settings(QUIZ24_USER_ID="174037")
 class AutomaticCreationTests(APITestCase):
     def setUp(self):
+        from apps.exams.tests.catalog_fixture import inject_catalog_fixture
+        inject_catalog_fixture(self)
         self.counselor_user = User.objects.create_user(username="builder-counselor", role=User.Role.COUNSELOR)
         self.counselor = CounselorProfile.objects.create(user=self.counselor_user)
         self.student_user = User.objects.create_user(username="builder-student", role=User.Role.STUDENT)
         cache.clear()
         grade = Grade.objects.create(name="هفتم", number=7)
         self.student = StudentProfile.objects.create(user=self.student_user, counselor=self.counselor, grade=grade)
+        from apps.exams.tests.catalog_fixture import link_student_fixture
+        link_student_fixture(self, self.student)
         patch("apps.exams.views.Quiz24Service.grades", return_value={"result":[{"id":10,"name":"هفتم"}]}).start()
         patch("apps.exams.views.Quiz24Service.courses", return_value={"result":[{"id":4932,"name":"درس","gradeId":10}]}).start()
         patch("apps.exams.views.Quiz24Service.course_detail", return_value={"result":[{"key":4932,"type":1,"title":"درس","children":[{"key":4510,"type":2,"title":"فصل","children":[{"key":9061,"type":3,"title":"مبحث","children":[{"key":999,"type":4,"title":"موضوع","children":[]}]}]}]}]}).start()

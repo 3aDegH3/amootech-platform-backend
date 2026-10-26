@@ -1,3 +1,18 @@
+> Sprint B update (2026-10-26): all three automatic creation entry points now use
+> the persistent shared basket. Combined multi-course submission remains UNVERIFIED
+> and blocked; only an explicitly chosen single-course exam is created. Recipient
+> permissions, verified provider identity, inventory and report provenance are checked
+> by the existing backend flow. See [the current builder contract](BUILDER.md).
+> Any older wizard, ephemeral-draft or automatic batch-creation descriptions below
+> are historical and do not describe the shared builder UI.
+
+> Sprint A update (2026-10-25): taxonomy browsing and validation now read the
+> verified, published PostgreSQL catalog revision through
+> `academics.provider_catalog.catalog`; the former remote 15-minute taxonomy
+> cache descriptions below are historical. Only `sync_quiz24_catalog` fetches
+> taxonomy from Quiz24. Dynamic inventory remains verified near exam creation.
+> See `../SPRINT_A.md` from the backend repository for deployment and QA.
+
 # Report-based exam builder — current workflow
 
 Students choose today, the Saturday-first week, or custom dates. The builder loads

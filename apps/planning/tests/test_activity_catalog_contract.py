@@ -18,6 +18,8 @@ from apps.planning.models import Plan, PlanDay, PlanItem
 
 class ActivityCatalogContractTests(APITestCase):
     def setUp(self):
+        from apps.exams.tests.catalog_fixture import inject_catalog_fixture
+        inject_catalog_fixture(self)
         cache.clear()
         self.fixture = json.loads((Path(__file__).parent / 'fixtures/activity_provider.json').read_text())
         self.owner = User.objects.create_user('catalog-counselor', role='COUNSELOR')
@@ -86,7 +88,7 @@ class ActivityCatalogContractTests(APITestCase):
         self.client.force_authenticate(orphan)
         self.assertEqual(self.client.get('/api/v1/exams/provider/grades/').status_code,403)
 
-    def test_new_study_requires_provider_grade_course_chapter_and_valid_parent(self):
+    def test_new_study_accepts_partial_scope_and_rejects_invalid_parent(self):
         plan = Plan.objects.create(student=self.student, counselor=self.counselor,
                                    start_date=date(2026,10,21), end_date=date(2026,10,21))
         day = PlanDay.objects.create(plan=plan, date=plan.start_date)
@@ -95,12 +97,15 @@ class ActivityCatalogContractTests(APITestCase):
         valid = {'provider':'quiz24','grade':self.fixture['grade'],
                  'course':self.fixture['course'],'chapter':chapter['key']}
         for taxonomy in ({}, {k:v for k,v in valid.items() if k != 'grade'},
-                         {k:v for k,v in valid.items() if k != 'chapter'},
-                         {**valid, 'chapter':2147483647}):
+                         {k:v for k,v in valid.items() if k != 'chapter'}):
             response = self.client.post('/api/v1/planning/items/',
                 {'plan_day':day.pk,'kind':'STUDY','title':'متن آزاد',
                  'planned_duration_minutes':60,'taxonomy':taxonomy},format='json')
-            self.assertEqual(response.status_code,400,response.data)
+            self.assertEqual(response.status_code,201,response.data)
+        response = self.client.post('/api/v1/planning/items/',
+            {'plan_day':day.pk,'kind':'STUDY','title':'نامعتبر','planned_duration_minutes':60,
+             'taxonomy':{**valid,'chapter':2147483647}},format='json')
+        self.assertEqual(response.status_code,400,response.data)
         legacy = PlanItem.objects.create(plan_day=day,kind='STUDY',title='فعالیت قدیمی',planned_duration_minutes=60)
         response = self.client.patch(f'/api/v1/planning/items/{legacy.pk}/', {'title':'عنوان اصلاح شده'}, format='json')
         self.assertEqual(response.status_code,200,response.data)

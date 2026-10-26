@@ -214,21 +214,20 @@ class ReportTopicTests(APITestCase):
         self.assertEqual(response.data['selected_topics'][0]['label'],'زیرمبحث')
 
 
-    def test_internal_report_resolves_only_unique_authorized_catalog_path(self):
+    def test_matching_internal_labels_require_explicit_reselection(self):
         from apps.academics.models import Chapter, Topic
         Chapter.objects.filter(pk=self.chapter.pk).update(name='مبحث 1')
         Topic.objects.filter(pk=self.topic.pk).update(name='مبحث 2')
-        _, source = self.activity(topic=self.topic)
+        self.activity(topic=self.topic)
         response = self.client.get(BASE+'topics/')
         self.assertEqual(response.status_code,200,response.data)
-        self.assertEqual(response.data['eligible_sources'],1)
-        group = response.data['groups'][0]
-        self.assertEqual((group['grade_id'],group['course_id']),(700,900))
-        node = next(n for n in group['topics'] if n['level']=='object')
-        self.assertEqual(node['path'],{'course':900,'chapter':1,'subject':2,'object':3})
-        self.assertEqual(node['sources'][0]['report_item_id'],source.pk)
-        context={'sources':node['sources'],'grade_id':700,'course_id':900,
-            'topics':[{'level':'object','id':3}],'confirmed':True,'question_type':1}
+        self.assertEqual(response.data['groups'],[])
+        refs=response.data['unresolved_sources']
+        self.assertEqual(len(refs),1)
+        context={'sources':refs,'grade_id':700,'course_id':900,
+                 'topics':[{'level':'object','id':3}],'confirmed':True,'question_type':1}
+        self.assertEqual(self.client.post(BASE+'topics/preview/',context,format='json').status_code,400)
+        context['reselected']=True
         self.assertEqual(self.client.post(BASE+'topics/preview/',context,format='json').status_code,200)
         self.create.assert_not_called()
 

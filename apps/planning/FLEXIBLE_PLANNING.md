@@ -1,3 +1,10 @@
+> Sprint A update (2026-10-25): taxonomy browsing and validation now read the
+> verified, published PostgreSQL catalog revision through
+> `academics.provider_catalog.catalog`; the former remote 15-minute taxonomy
+> cache descriptions below are historical. Only `sync_quiz24_catalog` fetches
+> taxonomy from Quiz24. Dynamic inventory remains verified near exam creation.
+> See `../SPRINT_A.md` from the backend repository for deployment and QA.
+
 # Flexible planning foundation
 
 The existing `/api/v1/planning/items/` create/PATCH/read routes remain in use.

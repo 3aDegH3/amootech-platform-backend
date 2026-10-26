@@ -15,6 +15,8 @@ from apps.exams.services.catalog import taxonomy_index
 
 class AutomaticCatalogTests(APITestCase):
     def setUp(self):
+        from apps.exams.tests.catalog_fixture import inject_catalog_fixture
+        inject_catalog_fixture(self)
         cache.clear()
         self.recorded=json.loads((Path(__file__).parent/'fixtures/automatic_catalog.json').read_text())
         self.user=User.objects.create_user('real-catalog-student',role='STUDENT')
@@ -24,6 +26,8 @@ class AutomaticCatalogTests(APITestCase):
         Grade.objects.create(id=9010,name='دهم',number=10)
         Grade.objects.create(id=9011,name='یازدهم',number=11)
         self.student=StudentProfile.objects.create(user=self.user,counselor=counselor,grade=grade,field=Field.objects.create(grade=grade,name='تجربی'))
+        from apps.exams.tests.catalog_fixture import link_student_fixture
+        link_student_fixture(self, self.student)
         self.client.force_authenticate(self.user)
         self.grades=self.enterContext(patch('apps.exams.services.quiz24.Quiz24Service.grades',return_value=self.recorded['all_grades']))
         self.courses=self.enterContext(patch('apps.exams.services.quiz24.Quiz24Service.courses',return_value=self.recorded['all_courses']))

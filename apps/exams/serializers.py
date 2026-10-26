@@ -162,6 +162,13 @@ class AutomaticFiltersMixin:
 
 
 class QuestionCountSerializer(AutomaticFiltersMixin, serializers.Serializer):
+    def to_internal_value(self, data):
+        if isinstance(data, Mapping) and set(data) - set(self.fields):
+            raise serializers.ValidationError({'detail': 'پارامتر ناشناخته یا موجودی چنددرسی پشتیبانی نمی‌شود؛ یک درس را بررسی کنید.'})
+        return super().to_internal_value(data)
+
+    student_ids = serializers.ListField(child=serializers.IntegerField(min_value=1), required=False, max_length=200)
+    student = serializers.PrimaryKeyRelatedField(queryset=StudentProfile.objects.all(), required=False)
     grade_id = serializers.IntegerField(min_value=1, max_value=2147483647)
     course_id = serializers.IntegerField(min_value=1, max_value=2147483647)
     chapter_ids = serializers.ListField(child=serializers.IntegerField(min_value=1), default=list, max_length=200)
@@ -174,19 +181,26 @@ class QuestionCountSerializer(AutomaticFiltersMixin, serializers.Serializer):
 
 
 class AutomaticExamSerializer(AutomaticFiltersMixin, CreateExamSerializer):
+    student_ids = serializers.ListField(child=serializers.IntegerField(min_value=1), required=False, max_length=200)
+    schedule = serializers.JSONField(required=False)
     from .services.report_topics import ReportScopeInput
     report_context = ReportScopeInput(required=False, write_only=True)
 
     creation_key = serializers.UUIDField(required=False, write_only=True)
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields['student'].required = False
         if self.context["request"].user.role == User.Role.STUDENT:
             self.fields["student"].required = False
             self.fields["student"].queryset = StudentProfile.objects.none()
 
     def to_internal_value(self, data):
-        if self.context["request"].user.role == User.Role.STUDENT and any(key in data for key in ("student", "student_id", "counselor", "counselor_id")):
+        if self.context["request"].user.role == User.Role.STUDENT and any(key in data for key in ("student", "student_id", "student_ids", "counselor", "counselor_id", "schedule")):
             raise serializers.ValidationError({"detail": "آزمون تمرینی فقط برای حساب خودتان ساخته می‌شود؛ انتخاب دانش‌آموز مجاز نیست."})
+        if isinstance(data, Mapping) and 'grade_id' in data and data['grade_id'] != data.get('grade_external_id'):
+            raise serializers.ValidationError({'grade_id': 'شناسه پایه با محدوده ساخت سازگار نیست.'})
+        if isinstance(data, Mapping) and set(data) - set(self.fields) - {'grade_id'}:
+            raise serializers.ValidationError({'detail': 'پارامتر ناشناخته یا ارسال چنددرسی پشتیبانی نمی‌شود؛ یک درس از سبد انتخاب کنید.'})
         return super().to_internal_value(data)
 
     course_id = serializers.IntegerField(min_value=1, max_value=2147483647)
@@ -203,6 +217,12 @@ class AutomaticExamSerializer(AutomaticFiltersMixin, CreateExamSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        attrs.setdefault('student', None)
+        if 'schedule' in attrs:
+            candidate = Exam(duration_minutes=attrs['duration_minutes'])
+            schedule = ExamScheduleSerializer(candidate, data=attrs['schedule'])
+            schedule.is_valid(raise_exception=True)
+            attrs['schedule'] = schedule.validated_data
         total = sum(attrs[field] for field in ("easy_count", "medium_count", "hard_count", "very_hard_count"))
         if not 1 <= total <= 2147483647:
             raise serializers.ValidationError("حداقل یک سوال با مجموع معتبر انتخاب کنید.")

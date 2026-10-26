@@ -11,10 +11,14 @@ from apps.exams.models import Exam, ExamAttempt
 
 class StudentPracticeTests(APITestCase):
     def setUp(self):
+        from apps.exams.tests.catalog_fixture import inject_catalog_fixture
+        inject_catalog_fixture(self)
         self.user = User.objects.create_user(username="practice-student", role=User.Role.STUDENT)
         cache.clear()
         grade = Grade.objects.create(name="هفتم", number=7)
         self.student = StudentProfile.objects.create(user=self.user, grade=grade)
+        from apps.exams.tests.catalog_fixture import link_student_fixture
+        link_student_fixture(self, self.student)
         patch("apps.exams.views.Quiz24Service.grades", return_value={"result":[{"id":1,"name":"هفتم"}]}).start()
         patch("apps.exams.views.Quiz24Service.courses", return_value={"result":[{"id":2,"name":"علوم","gradeId":1}]}).start()
         self.other_user = User.objects.create_user(username="other-student", role=User.Role.STUDENT)
@@ -92,7 +96,8 @@ class StudentPracticeTests(APITestCase):
                 self.assertEqual(getattr(self.client, method)(f"/api/v1/exams/provider/{path}/", payload, format="json").status_code, 200)
         self.assertEqual(self.client.post("/api/v1/exams/provider/question-count/", {"grade_id": 1, "course_id": 2, "question_type": 1}, format="json").status_code, 200)
         self.assertEqual(self.client.get("/api/v1/exams/provider/status/").status_code, 403)
-        self.assertEqual(self.client.get("/api/v1/exams/provider/education-periods/").status_code, 403)
+        with patch("apps.exams.views.Quiz24Service.education_periods", return_value={"result": []}):
+            self.assertEqual(self.client.get("/api/v1/exams/provider/education-periods/").status_code, 200)
         self.client.force_authenticate(user=None)
         self.assertIn(self.client.get("/api/v1/exams/provider/grades/").status_code, (401, 403))
         self.assertIn(self.client.post("/api/v1/exams/automatic/", self.payload, format="json").status_code, (401, 403))

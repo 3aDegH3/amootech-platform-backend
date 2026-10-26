@@ -105,7 +105,7 @@ class PlanItemSerializer(serializers.ModelSerializer):
         reset = attrs.pop('reset_generated_title', False)
         if reset and 'title' in attrs:
             raise serializers.ValidationError({'title': 'Reset and custom title cannot be supplied together.'})
-        if 'taxonomy' in attrs:
+        if 'taxonomy' in attrs and (not self.instance or attrs['taxonomy'] != self.instance.taxonomy):
             try:
                 attrs['taxonomy'] = resolve_selection(attrs['taxonomy'])
             except Quiz24Error as error:
@@ -115,14 +115,12 @@ class PlanItemSerializer(serializers.ModelSerializer):
             setattr(candidate, key, value)
         if candidate.taxonomy and any((candidate.subject_id, candidate.chapter_id, candidate.topic_id)):
             raise serializers.ValidationError({'taxonomy': 'Internal and Quiz24 selections cannot be mixed.'})
-        selection_changed = self.instance is None or bool(
-            {'taxonomy', 'subject', 'chapter', 'topic', 'kind', 'plan_day'} & set(attrs))
-        if candidate.kind != PlanItem.Kind.EVENT and selection_changed:
-            if (not isinstance(candidate.taxonomy, dict)
-                    or any(k not in candidate.taxonomy for k in ('grade', 'course', 'chapter'))):
-                raise serializers.ValidationError({'taxonomy': 'Grade, course and chapter from Quiz24 are required.'})
+        selection_changed = self.instance is None or any(
+            key in attrs and attrs[key] != getattr(self.instance, key)
+            for key in ('taxonomy','subject','chapter','topic','kind','plan_day'))
+        if candidate.taxonomy and selection_changed:
             from apps.academics.provider_catalog import authorize_provider
-            authorize_provider(day.plan.student.user, candidate.taxonomy['grade'], candidate.taxonomy['course'])
+            authorize_provider(day.plan.student.user, candidate.taxonomy.get('grade'), candidate.taxonomy.get('course'))
         generated = build_title(self.selection(candidate))
         custom = bool(attrs.get('title', '').strip()) if 'title' in attrs else (self.instance.title_is_custom if self.instance else False)
         if reset:
@@ -239,10 +237,16 @@ class PlanSerializer(serializers.ModelSerializer):
 
 
 class PlanDetailSerializer(PlanSerializer):
+    school_events = serializers.SerializerMethodField()
+
+    def get_school_events(self, obj):
+        from .school_events import occurrences
+        return occurrences(obj.student_id, obj.start_date, obj.end_date)
+
     days = PlanDayDetailSerializer(many=True, read_only=True)
 
     class Meta(PlanSerializer.Meta):
-        fields = PlanSerializer.Meta.fields + ("days",)
+        fields = PlanSerializer.Meta.fields + ("days", "school_events")
 
 
 class StudentFixedCommitmentSerializer(serializers.ModelSerializer):
@@ -328,8 +332,20 @@ class StudentFixedEventSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = StudentFixedEvent
-        fields = ("id", "student", "title", "date", "start_time", "end_time", "active", "created_at")
+        fields = ("id", "student", "title", "date", "kind", "weekday", "valid_from", "valid_until", "start_time", "end_time", "active", "created_at")
         read_only_fields = ("created_at",)
+
+    def create(self, validated_data):
+        from django.db import transaction
+        with transaction.atomic():
+            # Serialize repeated create requests for one student, including the
+            # empty-table case. Existing historical duplicates are not rewritten.
+            StudentProfile.objects.select_for_update().get(pk=validated_data['student'].pk)
+            candidate = StudentFixedEvent(**validated_data)
+            identity = {key: getattr(candidate, key) for key in
+                        ('student','title','kind','date','weekday','start_time','end_time','valid_from','valid_until','active')}
+            existing = StudentFixedEvent.objects.filter(**identity).first()
+            return existing or StudentFixedEvent.objects.create(**identity)
 
     def validate(self, attrs):
         user = self.context["request"].user

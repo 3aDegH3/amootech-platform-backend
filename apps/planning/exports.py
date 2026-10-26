@@ -58,6 +58,8 @@ def item_metrics(item):
 
 
 def date_label(value):
+    from jdatetime import date as jalali_date
+    value = jalali_date.fromgregorian(date=value)
     return f"{value.day:02d} ماه {value.month:02d} سال {value.year}"
 
 

@@ -109,35 +109,39 @@ class ReportTopicGroupsView(APIView):
             raise PermissionDenied('پروفایل دانش‌آموز موجود نیست.')
         data = query.validated_data
         sources = extract_sources(list(load_context(eligible_sources([student], data['start_date'], data['end_date']))))
-        groups, unavailable = {}, 0
+        groups, unavailable, unresolved = {}, 0, []
         try:
             for source in sources:
-                suggestion = resolve_suggestion(request.user, source)['suggestion']
-                if not suggestion or not suggestion['topics']:
+                from .services.report_topics import report_suggestions
+                suggestions = report_suggestions(request.user, source)
+                if not suggestions:
                     unavailable += 1
-                    continue
-                key = (suggestion['grade_id'], suggestion['course_id'])
-                if key not in groups:
-                    index, labels = tree_context(*key)
-                    groups[key] = {'grade_id':key[0], 'course_id':key[1],
-                        'grade_label':suggestion['grade_label'], 'course_label':suggestion['course_label'],
-                        'topics':{}, '_index':index, '_labels':labels}
-                group = groups[key]
-                for level, paths in group['_index'].items():
-                    for identifier, path in paths.items():
-                        if not within_report_scope(path, suggestion):
-                            continue
-                        topic = group['topics'].setdefault((level,identifier), {
-                            'level':level, 'id':identifier, 'label':group['_labels'][level][identifier],
-                            'path':path, 'chapter_label':group['_labels']['chapter'][path['chapter']], 'sources':[]})
-                        topic['sources'].append({'report_item_id':source['report_item_id'], 'source_revision':source['source_revision']})
+                    unresolved.append({'report_item_id':source['report_item_id'], 'source_revision':source['source_revision']})
+                for suggestion in suggestions:
+                    key = (suggestion['grade_id'], suggestion['course_id'])
+                    if key not in groups:
+                        index, labels = tree_context(*key)
+                        groups[key] = {'grade_id':key[0], 'course_id':key[1],
+                            'grade_label':suggestion['grade_label'], 'course_label':suggestion['course_label'],
+                            'topics':{}, 'course_sources':[], '_index':index, '_labels':labels}
+                    if not suggestion['topics']:
+                        groups[key]['course_sources'].append({'report_item_id':source['report_item_id'], 'source_revision':source['source_revision']})
+                    group = groups[key]
+                    for level, paths in group['_index'].items():
+                        for identifier, path in paths.items():
+                            if not within_report_scope(path, suggestion):
+                                continue
+                            topic = group['topics'].setdefault((level,identifier), {
+                                'level':level, 'id':identifier, 'label':group['_labels'][level][identifier],
+                                'path':path, 'chapter_label':group['_labels']['chapter'][path['chapter']], 'sources':[]})
+                            topic['sources'].append({'report_item_id':source['report_item_id'], 'source_revision':source['source_revision']})
             result = []
             for group in groups.values():
                 group.pop('_index'); group.pop('_labels')
                 group['topics'] = list(group['topics'].values())
                 result.append(group)
             return Response({'schema_version':1, 'groups':result, 'unavailable_sources':unavailable,
-                'eligible_sources':len(sources),
+                'eligible_sources':len(sources), 'unresolved_sources':unresolved,
                 'range':{'period':data['period'], 'start_date':data['start_date'].isoformat(),
                          'end_date':data['end_date'].isoformat()}})
         except Quiz24Error as error:

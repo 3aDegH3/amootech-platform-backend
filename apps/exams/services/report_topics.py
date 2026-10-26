@@ -57,6 +57,16 @@ class ReportPreviewInput(SourceInput):
 
 
 class ReportScopeInput(ReportPreviewInput):
+    topics = ConfirmedTopic(many=True, allow_empty=True, max_length=200)
+    whole_course = serializers.BooleanField(required=False)
+    reselected = serializers.BooleanField(required=False)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        if not attrs['topics'] and not attrs.get('whole_course') or attrs['topics'] and attrs.get('whole_course'):
+            raise ValidationError('مباحث یا کل درس را صریحاً انتخاب کنید.')
+        return attrs
+
     # The date-range builder groups repeated occurrences without dropping provenance.
     sources = SourceReference(many=True, allow_empty=False, max_length=2000)
 
@@ -134,56 +144,12 @@ def normalize_topics(topics, index, labels):
     return selected, filters
 
 
-def resolve_internal_suggestion(user, snapshot):
-    """Match a unique complete labelled path; never pass internal IDs to Quiz24."""
-    selection = snapshot.get('suggested_selection')
-    if not selection or selection.get('namespace') != 'academics':
-        return None
-    hierarchy = selection['hierarchy']
-    allowed = allowed_grades(user)
-    grade_name = hierarchy['grade']['label']
-    field_name = hierarchy['field']['label']
-    grades = [row for row in rows(catalog('grades'))
-              if str(field(row, 'gradeid', 'id', 'key')) in allowed
-              and field(row, 'gradename', 'name', 'title') in (grade_name, f'{grade_name} {field_name}')]
-    matches = []
-    for grade in grades:
-        grade_id = int(field(grade, 'gradeid', 'id', 'key'))
-        for course in rows(catalog('courses')):
-            if (str(field(course, 'gradeid')) != str(grade_id)
-                    or field(course, 'coursename', 'name', 'title') != hierarchy['course']['label']):
-                continue
-            course_id = int(field(course, 'courseid', 'id', 'key'))
-            try:
-                authorize_provider(user, grade_id, course_id)
-                index, labels = tree_context(grade_id, course_id)
-            except (ValidationError, PermissionDenied, ValueError, TypeError):
-                continue
-            # A course-only legacy declaration cannot establish studied chapters.
-            if 'chapter' not in hierarchy:
-                continue
-            levels = ('subject', 'object') if 'topic' in hierarchy else ('chapter',)
-            for level in levels:
-                for identifier, path in index[level].items():
-                    if labels['chapter'][path['chapter']] != hierarchy['chapter']['label']:
-                        continue
-                    if 'topic' in hierarchy and labels[level][identifier] != hierarchy['topic']['label']:
-                        continue
-                    topics, _ = normalize_topics([{'level':level, 'id':identifier}], index, labels)
-                    matches.append({'grade_id':grade_id, 'course_id':course_id,
-                        'grade_label':field(grade, 'gradename', 'name', 'title'),
-                        'course_label':field(course, 'coursename', 'name', 'title'), 'topics':topics})
-    return matches[0] if len(matches) == 1 else None
-
 
 def resolve_suggestion(user, snapshot):
     stored = snapshot['taxonomy_snapshot']['provider_context']
     internal = snapshot['taxonomy_snapshot']['internal']
     if not stored and any(internal.values()):
-        suggestion = resolve_internal_suggestion(user, snapshot)
-        return {'state':'SUGGESTED' if suggestion else 'NEEDS_SELECTION',
-                'reason':None if suggestion else 'مسیر داخلی گزارش تطبیق یکتای معتبر در Quiz24 ندارد.',
-                'suggestion':suggestion}
+        return {'state':'NEEDS_SELECTION', 'reason':'گزارش داخلی به انتخاب صریح از فهرست مجاز نیاز دارد.', 'suggestion':None}
     if not isinstance(stored, dict) or stored.get('provider') != 'quiz24' or any(internal.values()):
         return {'state':'NEEDS_SELECTION', 'reason':'انتخاب داخلی یا متنی به شناسه Quiz24 نگاشت نمی‌شود.', 'suggestion':None}
     course_id = stored.get('course')
@@ -215,8 +181,39 @@ def resolve_suggestion(user, snapshot):
         return {'state':'NEEDS_SELECTION', 'reason':'مسیر ذخیره‌شده قدیمی، نامعتبر یا خارج از دسترسی است؛ از فهرست مجاز انتخاب کنید.', 'suggestion':None}
 
 
+def report_suggestions(user, snapshot):
+    stored = snapshot['taxonomy_snapshot']['provider_context']
+    internal = snapshot['taxonomy_snapshot']['internal']
+    if isinstance(stored, dict) and stored.get('provider') == 'quiz24' and type(stored.get('grade')) is int and not any(stored.get(level) for level in ('course','chapter','subject','object')) and not any(internal.values()):
+        grade = stored['grade']
+        try:
+            authorize_provider(user, grade)
+            candidates = []
+            from copy import deepcopy
+            for course in rows(catalog('courses')):
+                if str(field(course, 'gradeid')) != str(grade):
+                    continue
+                identifier = int(field(course, 'courseid', 'id', 'key'))
+                try:
+                    authorize_provider(user, grade, identifier)
+                except PermissionDenied:
+                    continue
+                context = deepcopy(snapshot)
+                context['taxonomy_snapshot']['provider_context'] = {'provider':'quiz24','grade':grade,'course':identifier}
+                suggestion = resolve_suggestion(user, context)['suggestion']
+                if suggestion:
+                    candidates.append(suggestion)
+            return candidates
+        except (PermissionDenied, ValidationError, ValueError, TypeError):
+            return []
+    suggestion = resolve_suggestion(user, snapshot)['suggestion']
+    return [suggestion] if suggestion else []
+
+
 def within_report_scope(topic_path, suggestion):
     """A chapter declaration permits explicit children, never an implicit expansion."""
+    if not suggestion['topics']:
+        return topic_path.get('course') == suggestion['course_id']
     for topic in suggestion['topics']:
         if all(topic_path.get(level) == identifier for level, identifier in topic['path'].items()):
             return True
@@ -230,15 +227,22 @@ def confirmed_report_scope(user, data):
     topics, filters = normalize_topics(data['topics'], index, labels)
     suggestions = []
     for source in sources:
-        suggestion = resolve_suggestion(user, source)['suggestion']
-        if (not suggestion or suggestion['grade_id'] != data['grade_id']
-                or suggestion['course_id'] != data['course_id'] or not suggestion['topics']):
+        candidates = report_suggestions(user, source)
+        suggestion = next((row for row in candidates if row['grade_id'] == data['grade_id'] and row['course_id'] == data['course_id']), None)
+        if not candidates and data.get('reselected'):
+            suggestion = {'grade_id':data['grade_id'], 'course_id':data['course_id'], 'topics':[]}
+        if not suggestion:
             raise ValidationError({'sources': 'زمینه گزارش معتبر نیست؛ مباحث را دوباره دریافت کنید.'})
         suggestions.append(suggestion)
     links = []
     for source, suggestion in zip(sources, suggestions):
-        covered = [{'level':t['level'], 'id':t['id']} for t in topics
-                   if within_report_scope(t['path'], suggestion)]
+        if data.get('whole_course'):
+            if suggestion['topics']:
+                raise ValidationError({'topics':'کل درس خارج از محدوده این گزارش است.'})
+            covered = [{'level':'course', 'id':data['course_id']}]
+        else:
+            covered = [{'level':t['level'], 'id':t['id']} for t in topics
+                       if within_report_scope(t['path'], suggestion)]
         if not covered:
             raise ValidationError({'topics': 'مبحث انتخاب‌شده خارج از محدوده گزارش است.'})
         links.append({'report_item_id':source['report_item_id'], 'source_revision':source['source_revision'], 'topics':covered})

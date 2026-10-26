@@ -54,6 +54,26 @@ services:
       retries: 5
       start_period: 60s
 
+  catalog-sync:
+    init: true
+    restart: unless-stopped
+    logging: *default-logging
+    build:
+      context: .
+      network: ${DOCKER_BUILD_NETWORK:-host}
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    env_file: .env
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      RUN_MIGRATIONS: "false"
+    volumes:
+      - .:/app
+    command: python manage.py sync_quiz24_catalog --watch
+    depends_on:
+      backend:
+        condition: service_healthy
+
   frontend:
     init: true
     restart: unless-stopped
@@ -62,6 +82,9 @@ services:
     build:
       context: ../amootech-platform-frontend
       target: development
+      network: ${DOCKER_BUILD_NETWORK:-host}
+      args:
+        NPM_CONFIG_REGISTRY: ${NPM_CONFIG_REGISTRY:-https://registry.npmjs.org}
     environment:
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000/api/v1}
       WATCHPACK_POLLING: "true"

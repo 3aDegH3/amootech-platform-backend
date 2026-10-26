@@ -31,6 +31,10 @@ docker compose up -d --build --wait --wait-timeout 180
 Backend builds use the host network by default so package downloads use the
 host's DNS on Linux. Set `DOCKER_BUILD_NETWORK=default` in `.env` if your Docker
 installation requires the default build network (for example, Docker Desktop).
+The optional `NPM_CONFIG_REGISTRY` setting selects the registry used during the
+frontend image build and dependency-volume refresh. Its default is the official
+npm registry; use an accessible HTTPS mirror when that endpoint is blocked by
+the local network. `npm ci` continues to verify the existing lockfile integrity.
 
 The browser-facing `NEXT_PUBLIC_API_BASE_URL` defaults to
 `http://localhost:8000/api/v1`. The database hostname inside Compose is `db`.
@@ -45,9 +49,17 @@ process, and services restart unless explicitly stopped.
 
 This configuration runs the development servers with source mounts. Python's
 local `.venv` is not required for Docker commands. Rebuild images after changing
-dependencies; if the existing frontend dependency volume is stale, update it with
-`docker compose run --rm --no-deps --user root frontend npm ci`, then restart the
-frontend.
+dependencies. The frontend entrypoint compares package manifests with a stamp in
+its dependency volume and runs `npm ci` when they change. New dependency volumes
+are owned by the unprivileged `node` user. For an older root-owned volume, repair
+only the dependency/cache ownership once, then restart normally:
+
+```bash
+docker compose run --rm --no-deps --user root --entrypoint sh frontend -c 'chown -R node:node /app/node_modules /app/.next'
+docker compose up -d --build --wait --wait-timeout 180
+```
+
+This does not remove or reset the PostgreSQL volume.
 
 Changing `POSTGRES_PASSWORD` in `.env` does not update the database role password
 inside an existing `postgres_data` volume. Keep the existing credentials or change

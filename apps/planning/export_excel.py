@@ -138,6 +138,8 @@ def render_excel_from_viewmodel(vm) -> bytes:
     # Dates - C32:E32 for start, C33:E33 for end (2 rows)
     from datetime import date as date_type
     def fmt_date(d: date_type) -> str:
+        from jdatetime import date as jalali_date
+        d = jalali_date.fromgregorian(date=d)
         return f"{to_persian_digits(d.year)}/{to_persian_digits(f'{d.month:02d}')}/{to_persian_digits(f'{d.day:02d}')}"
     # Start date in C32 (merged C32:E32)
     ws["C32"].value = fmt_date(vm.start_date)

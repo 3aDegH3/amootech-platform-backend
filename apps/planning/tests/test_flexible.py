@@ -72,7 +72,7 @@ class FlexiblePlanningTests(APITestCase):
                         {'key': 901, 'title': 'فصل', 'type': 2, 'children': [
                             {'key': 902, 'title': 'مبحث', 'type': 3, 'children': [
                                 {'key': 903, 'title': 'موضوع', 'type': 4, 'children': []}]}]}]}]}}[method]
-        with patch('apps.academics.provider_catalog.catalog', side_effect=provider), patch('apps.exams.services.quiz24.Quiz24Service.create_exam') as mutation:
+        with patch('apps.academics.provider_catalog.catalog', side_effect=provider), patch('apps.exams.services.report_topics.catalog', side_effect=provider), patch('apps.exams.services.quiz24.Quiz24Service.create_exam') as mutation:
             for selection, expected in [({'grade': 700}, 'هفتم'), ({'course': 900}, 'علوم'),
                                         ({'course': 900, 'chapter': 901}, 'علوم — فصل'),
                                         ({'course': 900, 'object': 903}, 'علوم — موضوع')]:
@@ -131,10 +131,10 @@ class FlexiblePlanningTests(APITestCase):
     def test_catalog_cache_and_unavailability(self):
         from apps.academics.provider_catalog import catalog
         from apps.exams.exceptions import Quiz24Error
-        with patch('apps.exams.services.quiz24.Quiz24Service.grades', return_value={'result': []}) as remote:
+        with patch('apps.academics.local_catalog.read_catalog', return_value={'result': []}), patch('apps.exams.services.quiz24.Quiz24Service.grades') as remote:
             catalog('grades')
-            catalog('grades')
-            remote.assert_called_once()
+            catalog('grades', force_refresh=True)
+            remote.assert_not_called()
         with patch('apps.academics.provider_catalog.catalog', side_effect=Quiz24Error(None, 'offline')):
             self.assertEqual(self.create(taxonomy={'provider': 'quiz24', 'grade': 10}).status_code, 400)
             self.assertEqual(self.create(title='آزاد').status_code, 201)

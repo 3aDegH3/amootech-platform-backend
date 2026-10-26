@@ -110,7 +110,7 @@ class BackfillTests(TransactionTestCase):
         from django.db.migrations.executor import MigrationExecutor
         executor = MigrationExecutor(connection)
         before = [("accounts", "0004_student_mobile_verification"), ("exams", "0004_examcreation")]
-        after = [("accounts", "0004_student_mobile_verification"), ("exams", "0010_examattempt_participation_lease_until_and_more")]
+        after = executor.loader.graph.leaf_nodes()
         executor.migrate(before)
         try:
             old = executor.loader.project_state(before).apps

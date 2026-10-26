@@ -92,7 +92,10 @@ def _fixed_sources(student, date):
         yield "commitment", source, source.title, "مدرسه" if source.kind == StudentFixedCommitment.Kind.SCHOOL else "برنامه ثابت"
     for source in slots:
         yield "school_slot", source, source.subject_name, "مدرسه"
-    for source in StudentFixedEvent.objects.filter(student=student, active=True, date=date):
+    from django.db.models import Q
+    for source in StudentFixedEvent.objects.filter(Q(date=date) | Q(date__isnull=True, weekday=date.weekday()), student=student, active=True, kind="EVENT", start_time__isnull=False, end_time__isnull=False):
+        if source.valid_from and date < source.valid_from or source.valid_until and date > source.valid_until:
+            continue
         yield "event", source, source.title, "برنامه ثابت"
 
 

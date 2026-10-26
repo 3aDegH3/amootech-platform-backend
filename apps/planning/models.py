@@ -254,9 +254,13 @@ class StudentFixedEvent(models.Model):
 
     student = models.ForeignKey("accounts.StudentProfile", on_delete=models.CASCADE, related_name="fixed_events")
     title = models.CharField(max_length=200)
-    date = models.DateField()
-    start_time = models.TimeField()
-    end_time = models.TimeField()
+    date = models.DateField(null=True, blank=True)
+    kind = models.CharField(max_length=8, choices=(("EVENT", "رویداد"), ("EXAM", "امتحان"), ("QUIZ", "کوییز")), default="EVENT")
+    weekday = models.PositiveSmallIntegerField(choices=StudentFixedCommitment.Weekday.choices, null=True, blank=True)
+    valid_from = models.DateField(null=True, blank=True)
+    valid_until = models.DateField(null=True, blank=True)
+    start_time = models.TimeField(null=True, blank=True)
+    end_time = models.TimeField(null=True, blank=True)
     active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -266,7 +270,15 @@ class StudentFixedEvent(models.Model):
     def clean(self):
         if not self.title.strip():
             raise ValidationError({"title": "Title is required."})
-        if self.end_time <= self.start_time:
+        if (self.date is None) == (self.weekday is None):
+            raise ValidationError({'date': 'تاریخ دقیق یا روز هفته را انتخاب کنید؛ فقط یکی لازم است.'})
+        if self.date and ((self.valid_from and self.date < self.valid_from) or (self.valid_until and self.date > self.valid_until)):
+            raise ValidationError({'date': 'تاریخ رویداد باید در بازه اعتبار آن باشد.'})
+        if self.valid_from and self.valid_until and self.valid_until < self.valid_from:
+            raise ValidationError({'valid_until': 'پایان بازه باید پس از شروع باشد.'})
+        if self.end_time and not self.start_time:
+            raise ValidationError({'end_time': 'ساعت شروع را وارد کنید.'})
+        if self.start_time and self.end_time and self.end_time <= self.start_time:
             raise ValidationError({"end_time": "End time must be after start time."})
 
     def save(self, *args, **kwargs):

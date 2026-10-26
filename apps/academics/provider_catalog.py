@@ -1,11 +1,7 @@
 """Cached read-only Quiz24 adapter. No internal/provider ID equivalence."""
-import hashlib
-import json
 import logging
 from collections import Counter
-from django.core.cache import cache
 from rest_framework.exceptions import ValidationError, PermissionDenied
-from apps.exams.services.quiz24 import Quiz24Service
 from apps.accounts.models import User
 from .policy import student_period
 from apps.exams.exceptions import Quiz24Error
@@ -26,14 +22,10 @@ def rows(response):
 
 
 def catalog(method, *, force_refresh=False, **kwargs):
-    service = Quiz24Service()
-    identity = (service.base_url, service.user_id, service.api_key, method, kwargs)
-    key = 'planning:catalog:' + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-    value = cache.get(key)
-    if value is None or force_refresh:
-        value = getattr(service, method)(**kwargs)
-        cache.set(key, value, 900)
-    return value
+    # force_refresh re-reads the published local revision; only the sync worker
+    # may contact Quiz24. Dynamic inventory uses question_count separately.
+    from .local_catalog import read_catalog
+    return read_catalog(method, **kwargs)
 
 
 def valid_provider_id(value):
@@ -68,9 +60,17 @@ def grade_access(user):
         label = field(row, 'gradename', 'name', 'title')
         if not valid_provider_id(identifier) or identifiers[str(identifier)] != 1:
             continue
+        if 'canonicalGradeNumber' in row:
+            number = row['canonicalGradeNumber']
+            declared_field = field(row, 'verifiedfieldname')
+            if type(number) is int and low <= number <= high and (low != 10 or not declared_field or declared_field == student.field.name):
+                allowed[str(identifier)] = low == 10 and declared_field == student.field.name
+            continue
         specific = low == 10 and label in {f'{name} {student.field.name}' for name in names}
         if label in names or specific:
             allowed[str(identifier)] = specific
+    if not allowed:
+        raise PermissionDenied('نگاشت پایه و رشته در فهرست محلی تأیید نشده است؛ مدیر باید پروفایل تحصیلی و همگام‌سازی Quiz24 را بررسی کند.')
     return allowed
 
 

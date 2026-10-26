@@ -289,6 +289,13 @@ class ExamAccessTests(APITestCase):
         self.assertEqual(self.client.post(f"/api/v1/exams/{exam_id}/publish/").status_code, 200)
 
     def test_automatic_inventory_and_subscription_failures(self):
+        from apps.academics.models import Grade
+        from apps.exams.tests.catalog_fixture import inject_catalog_fixture, link_student_fixture
+        inject_catalog_fixture(self)
+        self.student.grade = Grade.objects.create(number=7, name="هفتم")
+        link_student_fixture(self, self.student)
+        self.enterContext(patch("apps.exams.views.Quiz24Service.grades", return_value={"result":[{"id":1,"name":"هفتم"}]}))
+        self.enterContext(patch("apps.exams.views.Quiz24Service.courses", return_value={"result":[{"id":2,"name":"علوم","gradeId":1}]}))
         self.client.force_authenticate(self.counselor_user)
         payload = dict(student=self.student.pk, title="automatic", grade_external_id=1, course_id=2, question_type=1, duration_minutes=20, easy_count=3)
         with patch("apps.exams.views.Quiz24Service.question_count", return_value={"status": 100, "result": {"easyCount": 2, "mediumCount": 0, "hardCount": 0, "veryHardCount": 0}}), patch("apps.exams.views.Quiz24Service.create_online_exam") as create:

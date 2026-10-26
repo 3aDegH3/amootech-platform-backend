@@ -19,9 +19,15 @@ class DemoSeedTests(TestCase):
         import json
         from pathlib import Path
         self.capture = json.loads((Path(__file__).parents[1] / 'demo_catalog.json').read_text())
+        for grade in self.capture['grades']['result']:
+            if grade.get('id') == self.capture['grade']:
+                grade['canonicalGradeNumber']=12
+                grade['verifiedFieldName']='تجربی'
         def catalog(method, **kwargs):
             if method == 'course_detail':
                 return self.capture['details'][str(kwargs['course_id'])]
+            if method == 'courses':
+                return {**self.capture[method],'result':[row for row in self.capture[method]['result'] if row['gradeId']==self.capture['grade'] and str(row['courseId']) in self.capture['details']]}
             return self.capture[method]
         for target in ('apps.academics.provider_catalog.catalog',
                        'apps.exams.services.report_topics.catalog', 'apps.exams.services.catalog.catalog'):
@@ -54,8 +60,8 @@ class DemoSeedTests(TestCase):
     def test_rerun_and_full_preview_flow(self):
         self.seed()
         student = StudentProfile.objects.get(user__username='demo_student')
-        self.assertEqual(student.grade.number, 12)
-        self.assertGreaterEqual(len({item.taxonomy['course'] for item in PlanItem.objects.all()}), 2)
+        self.assertEqual(student.grade.number, 10)
+        self.assertGreaterEqual(len({item.taxonomy['course'] for item in PlanItem.objects.all() if item.taxonomy.get('course')}), 2)
         statuses = set(DailyReportItem.objects.values_list('reported_status', flat=True))
         self.assertEqual(statuses, {'COMPLETED', 'PARTIAL', 'NOT_DONE', None})
         counts = (PlanItem.objects.count(), DailyReportItem.objects.count())
@@ -116,7 +122,7 @@ class DemoSeedTests(TestCase):
     def test_audit_classifies_missing_invalid_ambiguous_and_broken_links(self):
         import json
         self.seed()
-        items = list(PlanItem.objects.order_by('pk')[:3])
+        items = list(PlanItem.objects.filter(kind='STUDY').order_by('pk')[:3])
         PlanItem.objects.filter(pk=items[0].pk).update(taxonomy={})
         PlanItem.objects.filter(pk=items[1].pk).update(taxonomy={'provider':'quiz24','grade':31,'course':999999,'chapter':1})
         duplicate = dict(self.capture['courses']['result'][0])

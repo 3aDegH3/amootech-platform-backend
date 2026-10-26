@@ -1,4 +1,4 @@
-"""Read-only live taxonomy and report-reference audit; never infer provider IDs."""
+"""Read-only local taxonomy and report-reference audit; never infer provider IDs."""
 import json
 from collections import Counter
 
@@ -16,7 +16,7 @@ from .seed_demo import STUDENT_PATTERN
 
 
 class Command(BaseCommand):
-    help = 'Read-only live Quiz24 audit with aggregate counts; no data changed.'
+    help = 'Read-only local Quiz24 audit with aggregate counts; no data changed.'
 
     def add_arguments(self, parser):
         parser.add_argument('--json', action='store_true')
@@ -47,8 +47,6 @@ class Command(BaseCommand):
                 return 'invalid'
             if any((item.subject_id, item.chapter_id, item.topic_id)):
                 return 'invalid'
-            if any(k not in value for k in ('grade','course','chapter')):
-                return 'invalid'
             if (sum(str(field(r,'gradeid','id','key')) == str(grade) for r in grades) > 1
                     or sum(str(field(r,'courseid','id','key')) == str(course) and str(field(r,'gradeid')) == str(grade) for r in courses) > 1):
                 return 'ambiguous'
@@ -56,13 +54,13 @@ class Command(BaseCommand):
             key = (json.dumps(value, sort_keys=True), student.grade_id, student.field_id)
             if key not in validated:
                 try:
-                    if (grade, course) not in refreshed:
+                    if course is not None and grade is not None and (grade, course) not in refreshed:
                         tree = catalog('course_detail', grade_id=grade, course_id=course, force_refresh=True)
                         taxonomy_index(tree, course, grade)
                         refreshed.add((grade, course))
                     selection = resolve_selection(value)
-                    authorize_provider(student.user, selection['grade'], selection['course'])
-                    validated[key] = 'valid'
+                    authorize_provider(student.user, selection.get('grade'), selection.get('course'))
+                    validated[key] = 'valid' if any(k in selection for k in ('chapter','subject','object')) else 'broad'
                 except (APIException, ValueError, TypeError, KeyError):
                     validated[key] = 'invalid'
             return validated[key]
@@ -113,7 +111,7 @@ class Command(BaseCommand):
             row.student_id != row.plan_item.plan_day.plan.student_id
             for row in PlanItemExecution.objects.select_related('plan_item__plan_day__plan'))
         for name in ('plans','reports','demo_plans','demo_reports'):
-            for category in ('valid','missing','invalid','ambiguous','legacy'):
+            for category in ('valid','broad','missing','invalid','ambiguous','legacy'):
                 summary[name].setdefault(category,0)
         self.stdout.write(json.dumps(summary, ensure_ascii=False, sort_keys=True))
         if not options['json']:

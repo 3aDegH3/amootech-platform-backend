@@ -75,8 +75,8 @@ class PlanExportTests(APITestCase):
         self.assertIn(to_persian_digits(self.plan.pk), sheet["F32"].value)
         self.assertIn("هدف تسلط", sheet["S32"].value)
         # Persian dates
-        self.assertIn("۲۰۲۶", sheet["C32"].value)
-        self.assertIn("۲۰۲۶", sheet["C33"].value)
+        self.assertIn("۱۴۰۵", sheet["C32"].value)
+        self.assertIn("۱۴۰۵", sheet["C33"].value)
         # RTL and print setup
         self.assertEqual(sheet.print_area, "'Sheet2'!$A$1:$AK$44")
         self.assertEqual(sheet.page_setup.orientation, "landscape")

@@ -245,6 +245,8 @@ class MobileVerificationTests(APITransactionTestCase):
             self.assertEqual(start.call_count, 1)
 
     def test_seed_demo_never_delivers_otp_or_registers_students(self):
+        from apps.exams.tests.sprint_b_fixture import publish_recorded_catalog
+        publish_recorded_catalog()
         with patch.dict("os.environ", {"ALLOW_DEMO_SEED": "true"}), patch.object(RecordingOTPAdapter, "send") as sms:
             call_command("seed_demo", counselors=1, students_per_counselor=1, history_days=1, stdout=io.StringIO())
             call_command("seed_demo", counselors=1, students_per_counselor=1, history_days=1, reset=True, stdout=io.StringIO())

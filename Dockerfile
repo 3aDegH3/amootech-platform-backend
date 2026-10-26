@@ -15,7 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && addgroup --system django && adduser --system --ingroup django django
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --timeout=120 --retries=5 -r requirements.txt
 
 COPY --chown=django:django . .
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/amootech-entrypoint

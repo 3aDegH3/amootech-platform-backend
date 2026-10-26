@@ -12,10 +12,14 @@ NAMES = ['اول','دوم','سوم','چهارم','پنجم','ششم','هفتم',
 
 class QuestionBankTests(APITestCase):
     def setUp(self):
+        from apps.exams.tests.catalog_fixture import inject_catalog_fixture
+        inject_catalog_fixture(self)
         cache.clear()
         self.grades = {n: Grade.objects.create(name=name, number=n) for n,name in enumerate(NAMES,1)}
         self.user = User.objects.create_user('bank-student',role='STUDENT')
         self.student = StudentProfile.objects.create(user=self.user,grade=self.grades[12],field=Field.objects.create(grade=self.grades[12],name='ریاضی'))
+        from apps.exams.tests.catalog_fixture import link_student_fixture
+        link_student_fixture(self, self.student)
         self.client.force_authenticate(self.user)
         self.catalog_grades = {'result':[{'gradeId':1000+n,'gradeName':name} for n,name in enumerate(NAMES,1)]}
         self.catalog_courses = {'result':[{'courseId':2000+n,'courseName':f'درس {name}','gradeId':1000+n,'fieldName':'ریاضی'} for n,name in enumerate(NAMES,1)] + [{'courseId':9000,'courseName':'زیست','gradeId':1012,'fieldName':'تجربی'}]}
@@ -142,9 +146,24 @@ class QuestionBankTests(APITestCase):
     def test_participation_keeps_existing_verified_identity_guard(self):
         response=self.request_create()
         self.assertEqual(response.status_code,201,response.data)
+        StudentProfile.objects.filter(pk=self.student.pk).update(mobile_verified_at=None)
         with patch('apps.exams.views.Quiz24Service.get_participation_url') as participation:
             self.assertEqual(self.client.post(f"/api/v1/exams/{response.data['id']}/start/").status_code,409)
             participation.assert_not_called()
+
+    def test_unlinked_identity_blocks_creation_but_not_availability(self):
+        StudentProfile.objects.filter(pk=self.student.pk).update(quiz24_sync_status='NOT_READY')
+        self.assertEqual(self.request_count().status_code,200)
+        self.assertEqual(self.request_create().status_code,409)
+        self.create.assert_not_called()
+
+    def test_identity_change_during_inventory_prevents_remote_creation(self):
+        def inventory(**kwargs):
+            StudentProfile.objects.filter(pk=self.student.pk).update(mobile_verified_at=None)
+            return {'result':{'easyCount':10,'mediumCount':0,'hardCount':0,'veryHardCount':0}}
+        self.count.side_effect=inventory
+        self.assertEqual(self.request_create().status_code,409)
+        self.create.assert_not_called()
 
     def test_missing_profile_invalid_canonical_number_and_unmapped_field_fail_safely(self):
         missing = User.objects.create_user('missing-bank-profile', role='STUDENT')

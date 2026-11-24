@@ -363,6 +363,3 @@ This README documents the current implementation rather than promising future wo
 
 These items describe repository readiness work, not committed product delivery dates or feature commitments.
 
-## License and contact
-
-No root `LICENSE` file is present in this checkout. The repository owner needs to select and add a license; until then, reuse and contribution terms are not specified here. No project contact address or support channel is published in the repository. For project history and maintainer information, see the [backend repository](https://github.com/3aDegH3/amootech-platform-backend).
